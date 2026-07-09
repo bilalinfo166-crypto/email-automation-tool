@@ -54,8 +54,16 @@ def create_job(db, mode: str, name: str, domains: list[str], source: str = "manu
                      source=source, status="queued", total=len(clean_domains),
                      max_per_domain=max(1, min(int(max_per_domain or 2), 10)))
     db.add(job); db.commit(); db.refresh(job)
+    # Duplicate detection: check if domain was already scraped in a previous job (same mode)
     for d in clean_domains:
-        db.add(ScraperJobDomain(job_id=job.id, domain=d))
+        prev = (db.query(ScraperJobDomain)
+                .join(ScraperJob, ScraperJob.id == ScraperJobDomain.job_id)
+                .filter(ScraperJob.mode == mode,
+                        ScraperJobDomain.domain == d,
+                        ScraperJobDomain.status.in_(["completed", "no_email"]))
+                .first())
+        is_dup = prev is not None
+        db.add(ScraperJobDomain(job_id=job.id, domain=d, is_duplicate=is_dup))
     db.commit()
     return job
 
@@ -74,8 +82,13 @@ def _scrape_one(domain: str, mode: str = "vendor") -> dict:
 
 
 def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit: int):
+    import json
     contacts = result.get("contacts", [])
     status_text = result.get("status", "")
+    # Save vendor signals
+    vs = result.get("vendor_signals", {})
+    if vs:
+        jd.vendor_signals = json.dumps(vs)
     if not contacts:
         jd.status = "failed" if ("reach" in status_text or "skip" in status_text or "error" in status_text) else "no_email"
         jd.error = status_text if jd.status == "failed" else ""

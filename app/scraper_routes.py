@@ -75,7 +75,8 @@ def job_status(job_id: int, mode: str = "", db: Session = Depends(get_db)):
         "total": job.total, "done": job.done, "emails_found": job.emails_found,
         "progress": round(job.done / job.total * 100, 1) if job.total else 0,
         "domains": [{"domain": d.domain, "status": d.status, "error": d.error,
-                     "source_url": d.source_url,
+                     "source_url": d.source_url, "is_duplicate": d.is_duplicate,
+                     "vendor_signals": d.vendor_signals,
                      "last_checked": d.last_checked.isoformat() if d.last_checked else None}
                     for d in domains],
         "emails": [{"domain": r.domain, "email": r.email, "source_url": r.source_url,

@@ -118,9 +118,11 @@ class ScraperJobDomain(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("scraper_jobs.id"), index=True)
     domain: Mapped[str] = mapped_column(String, index=True)
-    status: Mapped[str] = mapped_column(String, default="pending")  # pending/scraping/completed/failed/no_email
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending/scraping/completed/failed/no_email/duplicate
     source_url: Mapped[str] = mapped_column(String, default="")
     error: Mapped[str] = mapped_column(String, default="")
+    is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
+    vendor_signals: Mapped[str] = mapped_column(String, default="")  # JSON: guest_post, blog, sponsored etc.
     last_checked: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
 
