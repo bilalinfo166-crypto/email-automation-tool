@@ -130,5 +130,7 @@ class ScraperResult(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("scraper_jobs.id"), index=True)
     domain: Mapped[str] = mapped_column(String, index=True)
     email: Mapped[str] = mapped_column(String, index=True)
+    email_type: Mapped[str] = mapped_column(String, default="domain_email")  # domain_email / free_provider_email
+    confidence: Mapped[str] = mapped_column(String, default="medium")        # high / medium / low
     source_url: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

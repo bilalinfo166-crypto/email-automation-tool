@@ -90,7 +90,9 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
                                           ScraperResult.email == email).first():
             continue
         db.add(ScraperResult(job_id=job.id, domain=jd.domain, email=email,
-                             source_url=c.get("source_url", "")))
+                             source_url=c.get("source_url", ""),
+                             email_type=c.get("email_type", "domain_email"),
+                             confidence=c.get("confidence", "medium")))
         kept += 1
     jd.status = "completed" if kept else "no_email"
     jd.source_url = valid[0].get("source_url", "") if valid else ""
@@ -182,7 +184,8 @@ def export_rows(db, job_id: int):
     rows = (db.query(ScraperResult)
             .filter(ScraperResult.job_id == job_id)
             .order_by(ScraperResult.domain).all())
-    return [("Domain", "Email", "Source URL")] + [(r.domain, r.email, r.source_url) for r in rows]
+    return [("Domain", "Email", "Email Type", "Confidence", "Source URL")] + \
+           [(r.domain, r.email, r.email_type, r.confidence, r.source_url) for r in rows]
 
 
 def export_csv(db, job_id: int) -> bytes:

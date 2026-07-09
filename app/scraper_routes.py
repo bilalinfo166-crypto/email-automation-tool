@@ -78,8 +78,9 @@ def job_status(job_id: int, mode: str = "", db: Session = Depends(get_db)):
                      "source_url": d.source_url,
                      "last_checked": d.last_checked.isoformat() if d.last_checked else None}
                     for d in domains],
-        "emails": [{"domain": r.domain, "email": r.email, "source_url": r.source_url}
-                   for r in results],
+        "emails": [{"domain": r.domain, "email": r.email, "source_url": r.source_url,
+                   "email_type": r.email_type, "confidence": r.confidence}
+                  for r in results],
     }
 
 
