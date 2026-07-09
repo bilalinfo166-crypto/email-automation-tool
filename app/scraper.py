@@ -1,18 +1,10 @@
-"""Compliant business-contact extractor (v2).
+"""Compliant business-contact extractor (v3).
 
-Extracts BOTH:
-  - Domain-based business emails (info@company.com, contact@brand.com)
-  - Publicly listed free-provider emails (businessname@gmail.com, blog@outlook.com)
-
-Rules baked in:
-  - Only fetches the company's OWN website (same registrable domain for navigation).
-  - Only visits public business pages: contact / about / team / support / legal / privacy.
-  - Extracts ALL emails found on those pages (domain-based AND free-provider).
-  - Does NOT guess/generate emails — only publicly visible ones.
-  - No social platforms, no forums, no search engines, no JS-render harvesting.
-  - Tags each email with email_type (domain_email / free_provider_email).
-  - Tags each email with confidence (high/medium/low) based on source page.
-  - Validates format, deduplicates, and checks MX.
+Speed: 15 concurrent workers, 5s timeout, continuous pool (no batch-wait).
+Extracts domain-based AND free-provider emails from public pages.
+Smart selection: domain-match first, business role, high-confidence, then free.
+Vendor mode: detects guest-post / write-for-us / advertise / blog signals.
+Filters dummy/placeholder emails (user@domain, test@, example@, etc.).
 """
 import re
 from urllib.parse import urlparse, urljoin
@@ -22,32 +14,35 @@ from bs4 import BeautifulSoup
 
 from .compliance import domain_has_mx
 
-TIMEOUT = 8
-MAX_PAGES = 6
-USER_AGENT = "Mozilla/5.0 (compatible; WarmWireCRM/1.0; +contact-page-only)"
+TIMEOUT = 5
+MAX_PAGES = 8
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 IGNORE_ENDINGS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js", ".ico", ".pdf")
 
-# Public business pages to visit
-BUSINESS_PAGE_HINTS = ["contact", "about", "team", "support", "legal", "privacy", "imprint", "impressum"]
+BUSINESS_PAGE_HINTS = ["contact", "about", "team", "support", "legal", "privacy", "imprint",
+                       "impressum", "write-for-us", "guest-post", "contribute", "advertise",
+                       "advertising", "sponsor", "blog"]
 
-# High-confidence page keywords (contact/about = most likely official email)
-HIGH_CONFIDENCE_KEYWORDS = ["contact", "contact-us", "get-in-touch", "kontakt", "contacto"]
-MEDIUM_HIGH_KEYWORDS = ["about", "about-us", "team", "our-team", "advertise", "advertising", "partnerships"]
-MEDIUM_KEYWORDS = ["support", "help", "legal", "privacy", "imprint", "impressum"]
+HIGH_CONF_KW = ["contact", "contact-us", "get-in-touch", "kontakt", "contacto",
+                "write-for-us", "guest-post", "contribute", "advertise"]
+MED_HIGH_KW = ["about", "about-us", "team", "our-team", "advertising", "partnerships", "sponsor"]
+MED_KW = ["support", "help", "legal", "privacy", "imprint", "impressum", "blog"]
 
 ROLE_PREFIXES = ["info", "contact", "sales", "hello", "support", "office", "admin",
-                 "enquiry", "enquiries", "inquiries", "help", "team", "mail", "marketing"]
+                 "enquiry", "enquiries", "inquiries", "help", "team", "mail", "marketing",
+                 "editor", "editorial", "press", "media", "partnerships", "business", "ads"]
 
-# Free email providers — emails from these are valid if publicly listed on a business page
 FREE_PROVIDERS = {"gmail.com", "yahoo.com", "yahoo.co.uk", "outlook.com", "hotmail.com",
                   "hotmail.co.uk", "live.com", "aol.com", "icloud.com", "protonmail.com",
                   "proton.me", "mail.com", "zoho.com", "yandex.com", "gmx.com", "gmx.net"}
 
-# Junk patterns — these are never real contact emails
+# Junk/dummy patterns — NEVER real contacts
 JUNK_PATTERNS = [
     r"^(noreply|no-reply|donotreply|mailer-daemon|postmaster|abuse|root|webmaster)@",
+    r"^(user|test|admin|demo|sample|placeholder|yourname|youremail|name|email|someone)@",
+    r"^(info|contact|hello|support|sales|mail|marketing|team)@(example|test|domain|sample|yoursite|website)\.",
     r"@example\.(com|org|net)$",
     r"@test\.",
     r"@localhost",
@@ -59,18 +54,30 @@ JUNK_PATTERNS = [
     r"@mailchimp\.com$",
     r"@sendgrid\.(com|net)$",
     r"@cloudflare\.com$",
+    r"^[a-z]@",           # single-char local = junk
+    r"@.*\.png$",
+    r"@.*\.jpg$",
 ]
 JUNK_RE = [re.compile(p, re.I) for p in JUNK_PATTERNS]
 
-# Sites we never navigate to (social/forums/mail providers — for LINK following, not email filtering)
-BLOCKED_NAV_DOMAINS = {"facebook.com", "fb.com", "linkedin.com", "instagram.com", "twitter.com",
-                       "x.com", "youtube.com", "t.me", "wa.me", "reddit.com", "quora.com", "medium.com"}
+BLOCKED_NAV = {"facebook.com", "fb.com", "linkedin.com", "instagram.com", "twitter.com",
+               "x.com", "youtube.com", "t.me", "wa.me", "reddit.com", "quora.com", "medium.com"}
+
+# Vendor signals — keywords that indicate a site accepts guest content
+VENDOR_KEYWORDS = {
+    "guest_post": ["write for us", "guest post", "guest author", "guest blog", "become a contributor",
+                   "submit a post", "submit article", "contribute", "guest writer", "submit guest"],
+    "link_insertion": ["link insertion", "niche edit", "link placement", "contextual link",
+                       "add a link", "insert link", "existing article"],
+    "sponsored": ["sponsored post", "sponsored content", "sponsored article", "paid post",
+                  "advertise with us", "advertising", "media kit", "press release", "paid content"],
+    "blog": ["blog", "/blog", "articles", "news", "insights", "resources"],
+}
 
 
 def _is_nav_blocked(domain: str) -> bool:
-    """Block navigating TO social/forum sites (not for filtering emails)."""
     d = domain.lower().strip(".")
-    return d in BLOCKED_NAV_DOMAINS or any(d.endswith("." + b) for b in BLOCKED_NAV_DOMAINS)
+    return d in BLOCKED_NAV or any(d.endswith("." + b) for b in BLOCKED_NAV)
 
 
 def _root_domain(url: str) -> str:
@@ -111,12 +118,10 @@ def _fetch(url: str):
 def _emails_from_html(html: str) -> set[str]:
     found = set(EMAIL_RE.findall(html))
     found |= set(EMAIL_RE.findall(_deobfuscate(html)))
-    # mailto: links
     for m in re.findall(r'mailto:([^\s"\'<>?&]+)', html, re.I):
         cleaned = m.strip().lower()
         if EMAIL_RE.match(cleaned):
             found.add(cleaned)
-    # Cloudflare email protection
     for m in re.findall(r'data-cfemail="([0-9a-fA-F]+)"', html):
         d = _decode_cfemail(m)
         if d:
@@ -130,32 +135,48 @@ def _emails_from_html(html: str) -> set[str]:
 
 
 def _is_junk(email: str) -> bool:
-    """Filter out system/platform/junk addresses that are never real contacts."""
     return any(p.search(email) for p in JUNK_RE)
 
 
-def _classify_email(email: str, site_root: str) -> str:
-    """Return 'domain_email' or 'free_provider_email'."""
+def _classify_email(email: str) -> str:
     _, _, dom = email.partition("@")
-    if dom in FREE_PROVIDERS:
-        return "free_provider_email"
-    return "domain_email"
+    return "free_provider_email" if dom in FREE_PROVIDERS else "domain_email"
 
 
-def _confidence_from_url(source_url: str) -> str:
-    """Score confidence based on which page the email was found on."""
+def _confidence(source_url: str) -> str:
     path = urlparse(source_url).path.lower().rstrip("/")
     slug = path.split("/")[-1] if path else ""
     full = path + " " + slug
-    if any(k in full for k in HIGH_CONFIDENCE_KEYWORDS):
+    if any(k in full for k in HIGH_CONF_KW):
         return "high"
-    if any(k in full for k in MEDIUM_HIGH_KEYWORDS):
-        return "high"  # about/team pages are strong signals too
-    if any(k in full for k in MEDIUM_KEYWORDS):
+    if any(k in full for k in MED_HIGH_KW):
+        return "high"
+    if any(k in full for k in MED_KW):
         return "medium"
     if path in ("", "/"):
-        return "medium"  # homepage — decent signal
+        return "medium"
     return "low"
+
+
+def _detect_vendor_signals(all_html: str, all_pages: list[str]) -> dict:
+    """Analyze site for guest-post/link-insertion/sponsored/blog signals."""
+    combined = all_html.lower()
+    urls_text = " ".join(all_pages).lower()
+    signals = {}
+    for sig, keywords in VENDOR_KEYWORDS.items():
+        found = [kw for kw in keywords if kw in combined or kw in urls_text]
+        if found:
+            signals[sig] = True
+    # detect specific pages
+    for url in all_pages:
+        p = urlparse(url).path.lower()
+        if any(k in p for k in ["write-for-us", "guest-post", "contribute", "submit"]):
+            signals["write_for_us_page"] = url
+        if any(k in p for k in ["advertise", "advertising", "sponsor", "media-kit"]):
+            signals["advertise_page"] = url
+        if "/blog" in p or "/articles" in p or "/news" in p:
+            signals["blog_page"] = url
+    return signals
 
 
 def _business_pages(base_url: str, root: str, html: str) -> list[str]:
@@ -179,43 +200,51 @@ def _business_pages(base_url: str, root: str, html: str) -> list[str]:
         if p not in seen:
             seen.add(p)
             uniq.append(p)
-    return uniq[:MAX_PAGES - 1]
+    return uniq[:MAX_PAGES]
 
 
-def extract_domain(domain: str) -> dict:
-    """Scrape one website for its publicly listed contact emails.
-    Returns both domain-based AND free-provider emails found on public pages."""
+def extract_domain(domain: str, mode: str = "vendor") -> dict:
+    """Scrape one website for publicly listed contact emails + vendor signals."""
     root = _root_domain(domain)
     if not root or _is_nav_blocked(root):
-        return {"domain": root, "contacts": [], "status": "skipped (not a company site)"}
+        return {"domain": root, "contacts": [], "status": "skipped (not a company site)", "vendor_signals": {}}
 
     base = "https://" + root
     home = _fetch(base)
     if home is None:
         home = _fetch("http://" + root)
     if home is None:
-        return {"domain": root, "contacts": [], "status": "site not reachable"}
+        return {"domain": root, "contacts": [], "status": "site not reachable", "vendor_signals": {}}
 
-    # Collect emails from all public pages, tracking which page each came from
+    all_html = home
     raw = _emails_from_html(home)
     source = {e: base for e in raw}
 
     pages = _business_pages(base, root, home)
     for path in ("/contact", "/contact-us", "/about", "/about-us", "/get-in-touch",
                  "/contacto", "/kontakt", "/impressum", "/advertise", "/advertising",
-                 "/partnerships", "/team", "/our-team", "/support", "/help"):
+                 "/partnerships", "/team", "/our-team", "/support", "/help",
+                 "/write-for-us", "/guest-post", "/contribute", "/submit-article",
+                 "/blog", "/sponsor"):
         u = base + path
         if u not in pages:
             pages.append(u)
-    for page in pages[:MAX_PAGES + 4]:
+
+    all_pages = [base]
+    for page in pages[:MAX_PAGES + 6]:
         html = _fetch(page)
         if html:
+            all_pages.append(page)
+            all_html += " " + html
             for e in _emails_from_html(html):
                 if e not in source:
                     source[e] = page
             raw |= set(source.keys())
 
-    # Build contacts — accept BOTH domain-based AND free-provider emails
+    # Vendor signals (only computed if mode == vendor)
+    vendor_signals = _detect_vendor_signals(all_html, all_pages) if mode == "vendor" else {}
+
+    # Build contacts — accept BOTH domain-based AND free-provider
     contacts = []
     seen = set()
     for e in sorted(raw):
@@ -225,21 +254,18 @@ def extract_domain(domain: str) -> dict:
         if e in seen:
             continue
         seen.add(e)
-
-        # Skip junk/system emails
         if _is_junk(e):
             continue
-
-        # Skip emails from platform domains (wix, wordpress, etc.) — already in JUNK_RE
-        # but also skip if the email domain is a social/nav-blocked site
         if _is_nav_blocked(dom):
             continue
 
-        email_type = _classify_email(e, root)
+        email_type = _classify_email(e)
         src = source.get(e, base)
-        confidence = _confidence_from_url(src)
+        conf = _confidence(src)
         is_role = any(local.startswith(p) for p in ROLE_PREFIXES)
         mx = domain_has_mx(dom)
+        # domain match = email domain matches the site being scraped
+        domain_match = (dom == root or dom.endswith("." + root))
 
         contacts.append({
             "email": e,
@@ -248,19 +274,21 @@ def extract_domain(domain: str) -> dict:
             "role_based": is_role,
             "mx_ok": mx,
             "email_type": email_type,
-            "confidence": confidence,
+            "confidence": conf,
+            "domain_match": domain_match,
         })
 
-    # Sort: high-confidence first, then domain_email before free_provider, then role-based, then MX
+    # SMART SORT: domain-match first > business role > high-confidence > domain_email > free
     conf_order = {"high": 0, "medium": 1, "low": 2}
     type_order = {"domain_email": 0, "free_provider_email": 1}
     contacts.sort(key=lambda c: (
-        conf_order.get(c["confidence"], 2),
-        type_order.get(c["email_type"], 1),
-        not c["mx_ok"],
-        not c["role_based"],
-        len(c["email"]),
+        not c["domain_match"],                    # site's own email first
+        conf_order.get(c["confidence"], 2),       # high confidence first
+        not c["role_based"],                      # role-based (info@, contact@) first
+        type_order.get(c["email_type"], 1),        # domain email before free
+        not c["mx_ok"],                           # deliverable first
+        len(c["email"]),                          # shorter = cleaner
     ))
 
     status = "scraped" if contacts else "no business email found"
-    return {"domain": root, "contacts": contacts, "status": status}
+    return {"domain": root, "contacts": contacts, "status": status, "vendor_signals": vendor_signals}

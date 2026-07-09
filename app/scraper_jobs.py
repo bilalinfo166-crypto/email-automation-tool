@@ -62,15 +62,15 @@ def create_job(db, mode: str, name: str, domains: list[str], source: str = "manu
 
 # ---------------- the worker ----------------
 
-WORKERS = 8   # domains scraped in parallel (big speedup)
+WORKERS = 15   # domains scraped in parallel — continuous pool, no batch-wait
 
 
-def _scrape_one(domain: str) -> dict:
+def _scrape_one(domain: str, mode: str = "vendor") -> dict:
     """Network only — safe to run in a thread (no DB access here)."""
     try:
-        return scraper.extract_domain(domain)
+        return scraper.extract_domain(domain, mode=mode)
     except Exception as e:
-        return {"contacts": [], "status": f"error: {type(e).__name__}"}
+        return {"contacts": [], "status": f"error: {type(e).__name__}", "vendor_signals": {}}
 
 
 def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit: int):
@@ -108,32 +108,36 @@ def _run(job_id: int):
             return
         job.status = "running"; db.commit()
         limit = job.max_per_domain or 2
+        mode = job.mode or "vendor"
+
+        # Continuous pool: submit ALL pending domains at once, process as they complete
         pool = ThreadPoolExecutor(max_workers=WORKERS)
         try:
-            while True:
+            all_domains = (db.query(ScraperJobDomain)
+                          .filter(ScraperJobDomain.job_id == job_id,
+                                  ScraperJobDomain.status == "pending").all())
+            for jd in all_domains:
+                jd.status = "scraping"; jd.last_checked = datetime.utcnow()
+            db.commit()
+
+            futures = {pool.submit(_scrape_one, jd.domain, mode): jd for jd in all_domains}
+            for fut in as_completed(futures):
                 db.refresh(job)
                 if job.status == "stopped":
+                    pool.shutdown(wait=False, cancel_futures=True)
                     break
-                batch = (db.query(ScraperJobDomain)
-                         .filter(ScraperJobDomain.job_id == job_id,
-                                 ScraperJobDomain.status == "pending")
-                         .limit(WORKERS).all())
-                if not batch:
-                    job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
-                    break
-                for jd in batch:
-                    jd.status = "scraping"; jd.last_checked = datetime.utcnow()
-                db.commit()
-                futures = {pool.submit(_scrape_one, jd.domain): jd for jd in batch}
-                for fut in as_completed(futures):
-                    jd = futures[fut]
-                    _save_result(db, job, jd, fut.result(), limit)
-                    job.done = (db.query(ScraperJobDomain)
-                                .filter(ScraperJobDomain.job_id == job_id,
-                                        ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
-                                .count())
-                    job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
-                    job.updated_at = datetime.utcnow(); db.commit()
+                jd = futures[fut]
+                _save_result(db, job, jd, fut.result(), limit)
+                job.done = (db.query(ScraperJobDomain)
+                            .filter(ScraperJobDomain.job_id == job_id,
+                                    ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
+                            .count())
+                job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
+                job.updated_at = datetime.utcnow(); db.commit()
+
+            db.refresh(job)
+            if job.status != "stopped":
+                job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
         finally:
             pool.shutdown(wait=False)
     finally:
