@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WarmWire Console</title>
+<style>
+  :root{--bg:#f4f6f9;--card:#fff;--ink:#161f2b;--muted:#5f6c7b;--line:#e3e7ec;--brand:#2b4bf2;--green:#12b76a;--amber:#f79009;--red:#f04438}
+  *{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,Arial,sans-serif}
+  body{background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}
+  header{background:#0e141d;color:#fff;padding:14px 22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header b{font-size:17px}
+  header .api{margin-left:auto;display:flex;gap:8px;align-items:center;font-size:12px}
+  header input{border:1px solid #2a3646;background:#18212d;color:#fff;border-radius:7px;padding:6px 9px;font-size:12px;width:200px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--red)}
+  .dot.ok{background:var(--green)}
+  nav{background:#fff;border-bottom:1px solid var(--line);display:flex;gap:2px;padding:0 14px;overflow-x:auto}
+  nav button{border:0;background:none;padding:14px 16px;cursor:pointer;font-size:13.5px;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap}
+  nav button.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
+  main{max-width:920px;margin:0 auto;padding:22px 16px 60px}
+  .view{display:none} .view.on{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
+  h2{font-size:17px;margin-bottom:4px} .sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+  label{display:block;font-size:12.5px;font-weight:600;color:var(--muted);margin:12px 0 6px}
+  input[type=text],input[type=email],textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:14px;background:#fbfcfd}
+  textarea{min-height:90px;resize:vertical;font-family:inherit}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);padding:9px 15px;border-radius:8px;cursor:pointer;font-size:13.5px;font-weight:500;margin-top:14px}
+  .btn:hover{background:#f6f8fa}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+  .btn.primary:hover{opacity:.92}
+  .btn.mini{padding:6px 11px;font-size:12px;margin:0}
+  .row{display:flex;gap:12px;flex-wrap:wrap} .row>*{flex:1;min-width:180px}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:8px;border-bottom:1px solid var(--line)}
+  td{padding:9px 8px;border-bottom:1px solid #eef1f4;font-size:13px}
+  .tag{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600}
+  .t-Sent,.t-Queued{background:#eef2ff;color:var(--brand)} .t-Replied{background:#e7f7ef;color:var(--green)}
+  .t-Unsubscribed{background:#fdecec;color:var(--red)} .t-Not.Interested,.t-NotInterested{background:#fef3e2;color:var(--amber)}
+  .t-Failed{background:#fdecec;color:var(--red)}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .kpi{background:#fbfcfd;border:1px solid var(--line);border-radius:10px;padding:14px}
+  .kpi .n{font-size:26px;font-weight:700} .kpi .l{font-size:12px;color:var(--muted)}
+  .msg{margin-top:12px;padding:10px 13px;border-radius:8px;font-size:13px;display:none}
+  .msg.ok{background:#e7f7ef;color:#0b7a47;display:block} .msg.err{background:#fdecec;color:#b42318;display:block}
+  .steps{counter-reset:s;list-style:none;font-size:13px;color:var(--muted)}
+  .steps li{padding:4px 0 4px 26px;position:relative}
+  .steps li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:3px;width:19px;height:19px;background:var(--brand);color:#fff;border-radius:50%;font-size:11px;display:grid;place-items:center}
+  .pill{font-size:11px;padding:2px 9px;border-radius:20px;background:#eef2ff;color:var(--brand);font-weight:600}
+  .warn{background:#fef3e2;border:1px solid #f6d9a6;color:#87561a;padding:12px 14px;border-radius:9px;font-size:12.5px;margin-top:12px}
+</style>
+</head>
+<body>
+<header>
+  <b>WarmWire Console</b>
+  <span class="pill">compliant B2B outreach</span>
+  <select id="modeSel" onchange="setMode(this.value)" style="border:1px solid #2a3646;background:#18212d;color:#fff;border-radius:7px;padding:6px 9px;font-size:12px;font-weight:600;cursor:pointer">
+    <option value="vendor">Vendor Outreach</option>
+    <option value="client">Client Hunting</option>
+  </select>
+  <div class="api">
+    <span class="dot" id="statusDot"></span>
+    API: <input id="apiBase" value="http://localhost:8000">
+    <button class="btn mini" onclick="testConn()" style="margin:0">Connect</button>
+  </div>
+</header>
+
+<nav>
+  <button class="on" data-v="home">Start</button>
+  <button data-v="profile">1 · Company Profile</button>
+  <button data-v="senders">2 · Senders</button>
+  <button data-v="domains">3 · Domains</button>
+  <button data-v="contacts">4 · Contacts</button>
+  <button data-v="campaign">5 · Campaign</button>
+  <button data-v="warmup">Warmup</button>
+  <button data-v="scraper">Email Scraper</button>
+  <button data-v="dashboard">Dashboard</button>
+</nav>
+
+<main>
+  <!-- HOME -->
+  <section class="view on" id="home">
+    <div class="card">
+      <h2>How WarmWire works</h2>
+      <p class="sub">Every email automatically carries your company footer + a working unsubscribe. Nothing sends until your profile is complete and you confirm you have permission to contact each business.</p>
+      <ol class="steps">
+        <li>Complete your <b>company profile</b> (once).</li>
+        <li>Connect your <b>sender inboxes</b> (Gmail via Google).</li>
+        <li>Upload the <b>business domains</b> you want to reach.</li>
+        <li>Run the scraper to pull each site's <b>public business email</b>.</li>
+        <li>Review contacts, create a campaign, confirm lawful basis, and send.</li>
+      </ol>
+      <div class="warn">Make sure your Python backend is running (<code>uvicorn app.main:app --reload</code>) before using this page. Then click <b>Connect</b> top-right.</div>
+    </div>
+  </section>
+
+  <!-- PROFILE -->
+  <section class="view" id="profile">
+    <div class="card">
+      <h2>Company Profile</h2>
+      <p class="sub">Filled once. These details appear in the footer of every email you send.</p>
+      <div class="row">
+        <div><label>Company name</label><input type="text" id="p_company"></div>
+        <div><label>Website URL</label><input type="text" id="p_website" placeholder="https://yourcompany.com"></div>
+      </div>
+      <label>Business postal address</label><input type="text" id="p_address" placeholder="Street, City, Country">
+      <div class="row">
+        <div><label>Sender name</label><input type="text" id="p_sender" placeholder="Alex Rivera"></div>
+        <div><label>Reply-to email</label><input type="email" id="p_reply" placeholder="you@yourcompany.com"></div>
+      </div>
+      <button class="btn primary" onclick="saveProfile()">Save profile</button>
+      <div class="msg" id="profileMsg"></div>
+    </div>
+  </section>
+
+  <!-- SENDERS -->
+  <section class="view" id="senders">
+    <div class="card">
+      <h2>Sender inboxes</h2>
+      <p class="sub">Connect the Gmail accounts you'll send from. Used only for load-balancing — not to evade limits.</p>
+      <button class="btn primary" onclick="connectGoogle()">Connect a Gmail (Google)</button>
+      <button class="btn" onclick="loadSenders()">Refresh</button>
+      <div class="msg" id="senderMsg"></div>
+      <table><thead><tr><th>Email</th><th>Method</th><th>Status</th><th>Sent today</th></tr></thead><tbody id="senderRows"></tbody></table>
+    </div>
+  </section>
+
+  <!-- DOMAINS -->
+  <section class="view" id="domains">
+    <div class="card">
+      <h2>Upload domains</h2>
+      <p class="sub">One website per line. The scraper only reads each company's own public pages (contact/about/team/support).</p>
+      <textarea id="domainList" placeholder="acme.com&#10;example-agency.com&#10;another-business.co"></textarea>
+      <button class="btn primary" onclick="saveDomains()">Save domains</button>
+      <button class="btn" onclick="runScrape()">Run scraper</button>
+      <div class="msg" id="domainMsg"></div>
+    </div>
+  </section>
+
+  <!-- CONTACTS -->
+  <section class="view" id="contacts">
+    <div class="card">
+      <h2>Review contacts</h2>
+      <p class="sub">Public business addresses found on each company's own site. Suppressed / opted-out emails are never included.</p>
+      <button class="btn" onclick="loadContacts()">Load contacts</button>
+      <div class="msg" id="contactMsg"></div>
+      <table><thead><tr><th>Email</th><th>Domain</th><th>Role</th><th>MX</th><th>Status</th></tr></thead><tbody id="contactRows"></tbody></table>
+    </div>
+  </section>
+
+  <!-- CAMPAIGN -->
+  <section class="view" id="campaign">
+    <div class="card">
+      <h2>Create campaign</h2>
+      <p class="sub">Identity, address and unsubscribe are added automatically from your profile.</p>
+      <label>Campaign name</label><input type="text" id="c_name">
+      <label>Subject line</label><input type="text" id="c_subject">
+      <label>Reason for contacting them (shown in footer)</label>
+      <input type="text" id="c_reason" placeholder="you listed this address publicly on your company website">
+      <label>Email body (HTML allowed)</label>
+      <textarea id="c_body" placeholder="<p>Hi there, ...</p>"></textarea>
+      <button class="btn primary" onclick="createCampaign()">Create campaign</button>
+      <div class="msg" id="campMsg"></div>
+    </div>
+
+    <div class="card" id="campManage" style="display:none">
+      <h2>Review &amp; send <span class="pill" id="campId"></span></h2>
+      <button class="btn" onclick="reviewCampaign()">1. Review</button>
+      <div class="msg" id="reviewMsg"></div>
+      <label style="display:flex;align-items:center;gap:9px;margin-top:14px;font-weight:500;color:var(--ink)">
+        <input type="checkbox" id="lawful" style="width:auto"> I confirm I have a lawful basis / permission to contact these businesses.
+      </label>
+      <button class="btn primary" onclick="approveCampaign()">2. Approve</button>
+      <button class="btn" onclick="buildQueue()">3. Build queue</button>
+      <button class="btn primary" onclick="sendBatch()">4. Send batch</button>
+      <div class="msg" id="sendMsg"></div>
+      <button class="btn" onclick="loadRecipients()" style="margin-top:16px">Refresh recipient status</button>
+      <table><thead><tr><th>Recipient</th><th>Status</th><th>Sent at</th></tr></thead><tbody id="recipRows"></tbody></table>
+    </div>
+  </section>
+
+  <!-- WARMUP -->
+  <section class="view" id="warmup">
+    <div class="card">
+      <h2>Inbox warmup</h2>
+      <p class="sub">Gradually warms your connected inboxes by sending a small, increasing number of emails <b>between the inboxes you own</b> — building sending reputation. No fake engagement; needs at least two connected senders.</p>
+      <button class="btn" onclick="loadWarmup()">Refresh status</button>
+      <button class="btn primary" onclick="runWarmup()">Run warmup batch</button>
+      <div class="msg" id="warmMsg"></div>
+      <table><thead><tr><th>Inbox</th><th>Day</th><th>Target today</th><th>Sent today</th><th>Health</th><th>Status</th></tr></thead><tbody id="warmRows"></tbody></table>
+    </div>
+  </section>
+
+  <!-- EMAIL SCRAPER -->
+  <section class="view" id="scraper">
+    <div class="card">
+      <h2>Email Scraper</h2>
+      <p class="sub">Extracts each company's own public business emails (contact/about/team/support pages) only. Runs as a background job with live progress. Active dashboard: <b id="scrMode">vendor</b>.</p>
+      <label>Method 1 — Domains (one per line, bulk paste supported)</label>
+      <textarea id="scrDomains" style="min-height:110px;font-family:monospace" placeholder="example.com&#10;https://example.com&#10;example.org/contact"></textarea>
+      <label style="margin-top:12px">Method 2 — Google Sheet (publish-to-web CSV link) — optional</label>
+      <input type="text" id="scrSheet" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv">
+      <div style="margin-top:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <button class="btn primary" onclick="startScraper()">Start scraping</button>
+        <label style="font-size:13px;color:#5f6c7b">Max emails per site:
+          <input id="scrLimit" type="number" min="1" max="10" value="2" style="width:60px;padding:6px 8px;border:1px solid #e3e7ec;border-radius:7px;margin-left:6px">
+        </label>
+      </div>
+      <div class="msg" id="scrMsg"></div>
+    </div>
+
+    <div class="card" id="scrJobCard" style="display:none">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">Job <span id="scrJobId"></span></h2>
+        <span class="pill b" id="scrJobStatus"></span>
+        <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn mini" onclick="scrControl('stop')">Stop</button>
+          <button class="btn mini" onclick="scrControl('resume')">Resume</button>
+          <button class="btn mini" onclick="scrControl('restart')">Restart</button>
+          <button class="btn mini" onclick="scrExport('csv')">Download CSV</button>
+          <button class="btn mini" onclick="scrExport('xlsx')">Download Excel</button>
+        </div>
+      </div>
+      <div style="height:10px;background:#eef1f4;border-radius:20px;margin:14px 0;overflow:hidden"><div id="scrBar" style="height:100%;width:0;background:#12b76a;transition:.3s"></div></div>
+      <div class="sub" id="scrCounts"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">
+        <div><h3 style="font-size:13px;margin-bottom:6px">Live domain status</h3><div style="max-height:320px;overflow:auto"><table><thead><tr><th>Domain</th><th>Status</th></tr></thead><tbody id="scrDomRows"></tbody></table></div></div>
+        <div><h3 style="font-size:13px;margin-bottom:6px">Emails found (<span id="scrEmailCount">0</span>)</h3><div style="max-height:320px;overflow:auto"><table><thead><tr><th>Email</th><th>Domain</th></tr></thead><tbody id="scrEmailRows"></tbody></table></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DASHBOARD -->
+  <section class="view" id="dashboard">
+    <div class="card">
+      <h2>Dashboard</h2>
+      <p class="sub">Live compliance &amp; delivery overview.</p>
+      <button class="btn" onclick="loadDashboard()">Refresh</button>
+      <button class="btn" onclick="scanReplies()">Scan replies (auto opt-out)</button>
+      <div class="msg" id="dashMsg"></div>
+      <div class="kpis" id="statusKpis" style="margin-top:16px"></div>
+      <div class="kpis" id="metaKpis" style="margin-top:12px"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+let API = "http://localhost:8000";
+let currentCampaign = null;
+let MODE = 'vendor';
+function setMode(m){
+  MODE = m;
+  document.getElementById('modeSel').value = m;
+  var sm=document.getElementById('scrMode'); if(sm) sm.textContent=m;
+  // scraper jobs are mode-scoped: clear the open job when switching dashboards
+  clearInterval(scrTimer); scrJob=null;
+  var jc=document.getElementById('scrJobCard'); if(jc) jc.style.display='none';
+  if(document.getElementById('contacts').classList.contains('on')) loadContacts();
+  if(document.getElementById('dashboard').classList.contains('on')) loadDashboard();
+}
+
+// ---- email scraper ----
+let scrJob=null, scrTimer=null;
+async function startScraper(){
+  const list=document.getElementById('scrDomains').value.split('\n').map(x=>x.trim()).filter(Boolean);
+  const sheet=document.getElementById('scrSheet').value.trim();
+  if(!list.length && !sheet){ show(scrMsg,'err','Add domains or a Google Sheet CSV link.'); return; }
+  try{
+    const limit=parseInt(document.getElementById('scrLimit').value)||2;
+    const r=await api('/crm/scraper/jobs','POST',{mode:MODE, domains:list, sheet_csv_url:sheet, max_per_domain:limit});
+    scrJob=r.job_id;
+    document.getElementById('scrJobCard').style.display='block';
+    document.getElementById('scrJobId').textContent='#'+r.job_id+' ('+MODE+')';
+    show(scrMsg,'ok','Job started with '+r.total+' domain(s). Live progress below.');
+    pollScraper();
+  }catch(e){ show(scrMsg,'err',e.message); }
+}
+function pollScraper(){ clearInterval(scrTimer); scrTimer=setInterval(updateScraper,1500); updateScraper(); }
+async function updateScraper(){
+  if(!scrJob) return;
+  try{
+    const d=await api('/crm/scraper/jobs/'+scrJob+'?mode='+MODE);
+    document.getElementById('scrJobStatus').textContent=d.status;
+    document.getElementById('scrBar').style.width=d.progress+'%';
+    document.getElementById('scrCounts').textContent=d.done+' / '+d.total+' domains processed · '+d.emails_found+' emails found';
+    const label={pending:'Pending',scraping:'Scraping…',completed:'Completed',failed:'Failed',no_email:'No email found'};
+    document.getElementById('scrDomRows').innerHTML=d.domains.map(x=>`<tr><td>${x.domain}</td><td>${label[x.status]||x.status}${x.error?' — '+x.error:''}</td></tr>`).join('');
+    document.getElementById('scrEmailCount').textContent=d.emails.length;
+    document.getElementById('scrEmailRows').innerHTML=d.emails.map(x=>`<tr><td>${x.email}</td><td>${x.domain}</td></tr>`).join('') || '<tr><td colspan=2 style="color:#9aa5b1">None yet</td></tr>';
+    if(d.status==='completed' || d.status==='stopped') clearInterval(scrTimer);
+  }catch(e){ clearInterval(scrTimer); show(scrMsg,'err',e.message); }
+}
+async function scrControl(action){
+  if(!scrJob) return;
+  try{ await api('/crm/scraper/jobs/'+scrJob+'/'+action+'?mode='+MODE,'POST'); pollScraper(); }
+  catch(e){ show(scrMsg,'err',e.message); }
+}
+function scrExport(fmt){
+  if(!scrJob) return;
+  window.open(base()+'/crm/scraper/jobs/'+scrJob+'/export?format='+fmt+'&mode='+MODE,'_blank');
+}
+
+function base(){ return document.getElementById('apiBase').value.trim().replace(/\/$/,''); }
+function show(el,type,text){ el.className='msg '+type; el.textContent=text; }
+
+async function api(path, method='GET', body=null){
+  const opt={method,headers:{'Content-Type':'application/json'}};
+  if(body) opt.body=JSON.stringify(body);
+  const res=await fetch(base()+path,opt);
+  const data=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.detail || ('Error '+res.status));
+  return data;
+}
+
+async function testConn(){
+  const dot=document.getElementById('statusDot');
+  try{ await api('/'); dot.classList.add('ok'); loadProfile(); }
+  catch(e){ dot.classList.remove('ok'); alert('Could not reach the backend. Is the server running at '+base()+' ?'); }
+}
+
+// nav
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
+  document.getElementById(b.dataset.v).classList.add('on');
+});
+
+// ---- profile ----
+async function loadProfile(){
+  try{ const p=await api('/crm/company-profile');
+    if(p.company_name!==undefined){
+      p_company.value=p.company_name||''; p_website.value=p.website_url||'';
+      p_address.value=p.business_address||''; p_sender.value=p.sender_name||''; p_reply.value=p.reply_to_email||'';
+    }
+  }catch(e){}
+}
+async function saveProfile(){
+  try{
+    const r=await api('/crm/company-profile','POST',{
+      company_name:p_company.value, website_url:p_website.value, business_address:p_address.value,
+      sender_name:p_sender.value, reply_to_email:p_reply.value });
+    show(profileMsg, r.completed?'ok':'err',
+      r.completed?'Profile saved and complete ✓':'Saved, still missing: '+r.missing.join(', '));
+  }catch(e){ show(profileMsg,'err',e.message); }
+}
+
+// ---- senders ----
+async function loadSenders(){
+  try{ const rows=await api('/senders');
+    senderRows.innerHTML=rows.map(s=>`<tr><td>${s.email}</td><td>${s.method}</td><td>${s.status}</td><td>${s.sent_today}</td></tr>`).join('')
+      || '<tr><td colspan=4 style="color:#9aa5b1">No senders yet.</td></tr>';
+  }catch(e){ show(senderMsg,'err',e.message); }
+}
+async function connectGoogle(){
+  try{ const r=await api('/auth/google/start');
+    window.open(r.authorization_url,'_blank');
+    show(senderMsg,'ok','A Google tab opened — pick your mailbox and Allow, then click Refresh.');
+  }catch(e){ show(senderMsg,'err',e.message); }
+}
+
+// ---- domains ----
+async function saveDomains(){
+  const list=domainList.value.split('\n').map(x=>x.trim()).filter(Boolean);
+  try{ const r=await api('/crm/domains','POST',{domains:list, mode:MODE});
+    show(domainMsg,'ok',r.added+' domain(s) saved to '+MODE+'. Now click Run scraper.');
+  }catch(e){ show(domainMsg,'err',e.message); }
+}
+async function runScrape(){
+  show(domainMsg,'ok','Scraping… this can take a moment.');
+  try{ const r=await api('/crm/scrape?mode='+MODE,'POST');
+    show(domainMsg,'ok',`Done. Processed ${r.domains_processed} domain(s), found ${r.new_contacts} new contact(s). Check the Contacts tab.`);
+  }catch(e){ show(domainMsg,'err',e.message); }
+}
+
+// ---- contacts ----
+async function loadContacts(){
+  try{ const rows=await api('/crm/contacts?mode='+MODE);
+    contactRows.innerHTML=rows.map(c=>`<tr><td>${c.email}</td><td>${c.domain}</td>
+      <td>${c.role_based?'role':'-'}</td><td>${c.mx_ok?'✓':'✗'}</td><td>${c.status}</td></tr>`).join('')
+      || '<tr><td colspan=5 style="color:#9aa5b1">No contacts in '+MODE+' yet.</td></tr>';
+  }catch(e){ show(contactMsg,'err',e.message); }
+}
+
+// ---- campaign ----
+async function createCampaign(){
+  try{ const r=await api('/crm/campaigns','POST',{
+      name:c_name.value, mode:MODE, subject:c_subject.value, reason_for_contact:c_reason.value, body_html:c_body.value });
+    currentCampaign=r.id;
+    campId.textContent='#'+r.id+' ('+MODE+')'; campManage.style.display='block';
+    show(campMsg,'ok','Campaign created in '+MODE+'. Now review & approve below.');
+  }catch(e){ show(campMsg,'err',e.message); }
+}
+async function reviewCampaign(){
+  try{ const r=await api('/crm/campaigns/'+currentCampaign+'/review','POST');
+    if(r.ready_to_approve) show(reviewMsg,'ok','Ready to approve. Tick the box and click Approve.');
+    else{
+      let t=[]; if(r.missing_company_profile.length) t.push('Profile: '+r.missing_company_profile.join(', '));
+      if(r.missing_campaign_fields.length) t.push('Campaign: '+r.missing_campaign_fields.join(', '));
+      show(reviewMsg,'err','Not ready — '+t.join(' | '));
+    }
+  }catch(e){ show(reviewMsg,'err',e.message); }
+}
+async function approveCampaign(){
+  if(!lawful.checked){ show(sendMsg,'err','Please tick the lawful-basis confirmation first.'); return; }
+  try{ const r=await api('/crm/campaigns/'+currentCampaign+'/approve','POST',{lawful_basis_confirmed:true});
+    show(sendMsg,'ok','Approved. Now Build queue, then Send batch.');
+  }catch(e){ show(sendMsg,'err',e.message); }
+}
+async function buildQueue(){
+  try{ const r=await api('/crm/campaigns/'+currentCampaign+'/build-queue','POST');
+    show(sendMsg,'ok',`Queued ${r.queued}. Skipped ${r.skipped_suppressed} suppressed, ${r.skipped_duplicate} duplicate.`);
+  }catch(e){ show(sendMsg,'err',e.message); }
+}
+async function sendBatch(){
+  try{ const r=await api('/crm/campaigns/'+currentCampaign+'/send-batch?batch_size=20','POST');
+    show(sendMsg,'ok',`Sent ${r.sent}, failed ${r.failed}, skipped ${r.skipped}. Remaining ${r.remaining}. (Space sends ${r.min_delay_sec}-${r.max_delay_sec}s apart.)`);
+    loadRecipients();
+  }catch(e){ show(sendMsg,'err',e.message); }
+}
+async function loadRecipients(){
+  try{ const rows=await api('/crm/campaigns/'+currentCampaign+'/recipients');
+    recipRows.innerHTML=rows.map(r=>`<tr><td>${r.email}</td>
+      <td><span class="tag t-${r.status.replace(' ','')}">${r.status}</span></td>
+      <td>${r.sent_at?new Date(r.sent_at).toLocaleString():'-'}</td></tr>`).join('')
+      || '<tr><td colspan=3 style="color:#9aa5b1">Queue empty — build it first.</td></tr>';
+  }catch(e){}
+}
+
+// ---- dashboard ----
+async function loadDashboard(){
+  try{ const d=await api('/crm/dashboard?mode='+MODE);
+    statusKpis.innerHTML=Object.entries(d.statuses).map(([k,v])=>`<div class="kpi"><div class="n">${v}</div><div class="l">${k}</div></div>`).join('');
+    metaKpis.innerHTML=`
+      <div class="kpi"><div class="n">${d.contacts}</div><div class="l">Contacts (${MODE})</div></div>
+      <div class="kpi"><div class="n">${d.suppressed}</div><div class="l">Suppressed / opted-out</div></div>
+      <div class="kpi"><div class="n">${d.unsubscribe_rate}%</div><div class="l">Unsubscribe rate</div></div>`;
+    show(dashMsg, d.company_profile_completed?'ok':'err',
+      d.company_profile_completed?('Showing '+MODE+' · company profile complete ✓'):'⚠ Complete your company profile before sending.');
+  }catch(e){ show(dashMsg,'err',e.message); }
+}
+
+// ---- warmup ----
+async function loadWarmup(){
+  try{ const d=await api('/crm/warmup/status');
+    warmRows.innerHTML=d.senders.map(s=>`<tr><td>${s.email}</td><td>${s.day}</td><td>${s.target_today}</td><td>${s.sent_today}</td><td>${s.health}</td><td>${s.status}</td></tr>`).join('')
+      || '<tr><td colspan=6 style="color:#9aa5b1">No inboxes connected.</td></tr>';
+    show(warmMsg, d.can_warm?'ok':'err', d.note);
+  }catch(e){ show(warmMsg,'err',e.message); }
+}
+async function runWarmup(){
+  show(warmMsg,'ok','Sending warmup batch…');
+  try{ const r=await api('/crm/warmup/run?max_sends=10','POST');
+    if(r.reason) show(warmMsg,'err',r.reason);
+    else show(warmMsg,'ok',`Sent ${r.sent} warmup email(s) across ${r.inboxes||0} inbox(es).`);
+    loadWarmup();
+  }catch(e){ show(warmMsg,'err',e.message); }
+}
+async function scanReplies(){
+  show(dashMsg,'ok','Scanning inboxes…');
+  try{ const r=await api('/crm/replies/scan','POST');
+    show(dashMsg,'ok',`Processed ${r.replies_processed} repl(y/ies), ${r.opt_outs} opt-out(s) auto-suppressed.`);
+    loadDashboard();
+  }catch(e){ show(dashMsg,'err',e.message); }
+}
+
+// auto-connect on load
+testConn();
+</script>
+</body>
+</html>

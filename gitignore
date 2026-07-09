@@ -1,0 +1,29 @@
+# Secrets — NEVER push these
+.env
+credentials.json
+
+# Database (local dev only)
+warmwire.db
+warmwire.db-wal
+warmwire.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

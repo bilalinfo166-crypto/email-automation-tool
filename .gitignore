@@ -1,0 +1,13 @@
+﻿.env
+credentials.json
+warmwire.db
+warmwire.db-wal
+warmwire.db-shm
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+app_old/
