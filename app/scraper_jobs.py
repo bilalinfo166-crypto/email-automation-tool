@@ -70,7 +70,7 @@ def create_job(db, mode: str, name: str, domains: list[str], source: str = "manu
 
 # ---------------- the worker ----------------
 
-WORKERS = 15   # domains scraped in parallel — continuous pool, no batch-wait
+WORKERS = 20   # 20 domains parallel = super fast
 
 
 def _scrape_one(domain: str, mode: str = "vendor") -> dict:
@@ -85,10 +85,13 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     import json
     contacts = result.get("contacts", [])
     status_text = result.get("status", "")
-    # Save vendor signals
+    # Save vendor signals OR client category
     vs = result.get("vendor_signals", {})
+    cat = result.get("client_category", "")
     if vs:
         jd.vendor_signals = json.dumps(vs)
+    elif cat:
+        jd.vendor_signals = json.dumps({"category": cat})
     if not contacts:
         jd.status = "failed" if ("reach" in status_text or "skip" in status_text or "error" in status_text) else "no_email"
         jd.error = status_text if jd.status == "failed" else ""
