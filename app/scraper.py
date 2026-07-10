@@ -75,31 +75,65 @@ def _cfe(enc):
     except: return None
 
 def _deob(t):
+    # [at] (at) {at} variations
     t=re.sub(r"\s*[\[\(\{]\s*at\s*[\]\)\}]\s*","@",t,flags=re.I)
+    # [dot] (dot) {dot} variations
     t=re.sub(r"\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*",".",t,flags=re.I)
+    # "at" as word between spaces: info at domain dot com
+    t=re.sub(r"\s+at\s+","@",t,flags=re.I)
+    t=re.sub(r"\s+dot\s+",".",t,flags=re.I)
+    # HTML entities: &#64; = @ and &#46; = .
+    t=t.replace("&#64;","@").replace("&#46;",".").replace("&#x40;","@").replace("&#x2e;",".")
+    # (at) without brackets sometimes written as " AT "
+    t=re.sub(r"\sAT\s","@",t)
+    t=re.sub(r"\sDOT\s",".",t)
     return t
 
 def _get(url, to=None):
     try:
         r=_s.get(url, timeout=to or TIMEOUT, allow_redirects=True)
         if r.status_code>=400: return None
-        ct=r.headers.get("content-type","")
-        if "text" not in ct and "html" not in ct: return None
-        return r.text
+        # Accept any text-like content (html, xhtml, xml, plain text)
+        ct=r.headers.get("content-type","").lower()
+        if any(k in ct for k in ["text","html","xml","json"]): return r.text
+        if not ct: return r.text  # no content-type header = try anyway
+        return None
     except: return None
 
 def _find(html):
+    # 1) Raw regex on full HTML source
     f=set(EMAIL_RE.findall(html))
-    f|=set(EMAIL_RE.findall(_deob(html)))
+    # 2) Deobfuscated text
+    deobbed=_deob(html)
+    f|=set(EMAIL_RE.findall(deobbed))
+    # 3) mailto: links
     for m in re.findall(r'mailto:([^\s"\'<>?&]+)',html,re.I):
         c=m.strip().lower()
         if EMAIL_RE.match(c): f.add(c)
+    # 4) Cloudflare protected
     for m in re.findall(r'data-cfemail="([0-9a-fA-F]+)"',html):
         d=_cfe(m)
         if d: f.add(d)
+    # 5) href attributes with @
     for m in re.findall(r'href=["\']([^"\']*@[^"\']*)["\']',html):
         c=m.replace("mailto:","").strip().lower()
         if EMAIL_RE.match(c): f.add(c)
+    # 6) Parse with BeautifulSoup for visible text (catches rendered obfuscation)
+    try:
+        soup=BeautifulSoup(html,"html.parser")
+        # Get ALL visible text
+        text=soup.get_text(" ",strip=True)
+        f|=set(EMAIL_RE.findall(text))
+        f|=set(EMAIL_RE.findall(_deob(text)))
+        # Check title, meta description, alt tags
+        for tag in soup.find_all("meta"):
+            content=tag.get("content","")
+            if content:
+                f|=set(EMAIL_RE.findall(content))
+                f|=set(EMAIL_RE.findall(_deob(content)))
+        for tag in soup.find_all(attrs={"alt":True}):
+            f|=set(EMAIL_RE.findall(_deob(tag["alt"])))
+    except: pass
     return {e.lower().strip(".") for e in f if not e.lower().endswith((".png",".jpg",".gif",".svg",".css",".js",".ico",".pdf"))}
 
 def _junk(e): return any(p.search(e) for p in JUNK_RE)
