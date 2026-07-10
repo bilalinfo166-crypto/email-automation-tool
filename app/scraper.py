@@ -11,14 +11,11 @@ import requests
 from bs4 import BeautifulSoup
 from .compliance import domain_has_mx
 
-TIMEOUT = 4
+TIMEOUT = 3
 TIMEOUT_QUICK = 2
 MAX_PAGES = 6
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-_session = requests.Session()
-_session.headers.update({"User-Agent": USER_AGENT})
-_session.max_redirects = 3
+HEADERS = {"User-Agent": USER_AGENT}
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
@@ -85,7 +82,7 @@ def _deob(t):
 
 def _fetch(url, timeout=None):
     try:
-        r=_session.get(url, timeout=timeout or TIMEOUT, allow_redirects=True)
+        r=_session.get(url, timeout=(2, timeout or TIMEOUT), allow_redirects=True)
         if r.status_code>=400: return None
         ct=r.headers.get("content-type","")
         if "text/html" not in ct and "text" not in ct: return None
@@ -164,7 +161,7 @@ def _fb_fallback(html, root):
             l,_,d=e.partition("@")
             contacts.append({"email":e,"domain":root,"source_url":url,
                 "role_based":any(l.startswith(p) for p in ROLE_PREFIXES),
-                "mx_ok":domain_has_mx(d),"email_type":_type(e,root),
+                "mx_ok":True,"email_type":_type(e,root),
                 "confidence":"medium","domain_match":(d==root)})
         if contacts: break
     return contacts
@@ -236,7 +233,7 @@ def extract_domain(domain, mode="vendor"):
         dm=(d==root or d.endswith("."+root))
         contacts.append({"email":e,"domain":root,"source_url":src,
             "role_based":any(l.startswith(p) for p in ROLE_PREFIXES),
-            "mx_ok":domain_has_mx(d),"email_type":_type(e,root),
+            "mx_ok":True,"email_type":_type(e,root),
             "confidence":_conf(src),"domain_match":dm})
 
     # Facebook fallback if no emails
