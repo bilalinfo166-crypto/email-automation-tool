@@ -112,24 +112,22 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     db.commit()
 
 
-def _scrape_with_retry(domain: str, mode: str = "vendor", retries: int = 2) -> dict:
-    """Try scraping up to `retries` times on failure."""
-    for attempt in range(retries):
+def _scrape_with_retry(domain: str, mode: str = "vendor") -> dict:
+    """Try scraping, retry once on failure."""
+    for attempt in range(2):
         try:
             result = scraper.extract_domain(domain, mode=mode)
-            status = result.get("status", "")
-            # If site not reachable on first try, retry
-            if "not reachable" in status and attempt < retries - 1:
+            if "not reachable" in result.get("status", "") and attempt == 0:
                 continue
             return result
         except Exception as e:
-            if attempt < retries - 1:
+            if attempt == 0:
                 continue
             return {"contacts": [], "status": f"error: {type(e).__name__}", "vendor_signals": {}}
     return {"contacts": [], "status": "error: max retries", "vendor_signals": {}}
 
 
-CHUNK_SIZE = 50  # process in chunks of 50 for memory safety on 10k+ jobs
+CHUNK_SIZE = 50
 
 
 def _run(job_id: int):
@@ -150,19 +148,17 @@ def _run(job_id: int):
                 if job.status == "stopped":
                     break
 
-                # Grab next chunk of pending domains
                 chunk = (db.query(ScraperJobDomain)
                          .filter(ScraperJobDomain.job_id == job_id,
                                  ScraperJobDomain.status == "pending")
                          .limit(CHUNK_SIZE).all())
                 if not chunk:
-                    break  # all done
+                    break
 
                 for jd in chunk:
                     jd.status = "scraping"; jd.last_checked = datetime.utcnow()
                 db.commit()
 
-                # Submit chunk to pool — as each finishes, result saves immediately
                 futures = {pool.submit(_scrape_with_retry, jd.domain, mode): jd for jd in chunk}
                 for fut in as_completed(futures):
                     try:
@@ -176,19 +172,15 @@ def _run(job_id: int):
                         except Exception:
                             result = {"contacts": [], "status": "error: thread crash", "vendor_signals": {}}
                         _save_result(db, job, jd, result, limit)
+                        # UPDATE COUNTERS AFTER EACH DOMAIN (not after chunk)
+                        job.done = (db.query(ScraperJobDomain)
+                                    .filter(ScraperJobDomain.job_id == job_id,
+                                            ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
+                                    .count())
+                        job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
+                        job.updated_at = datetime.utcnow(); db.commit()
                     except Exception:
-                        pass  # never crash the whole job for one domain
-
-                # Update job counters after each chunk
-                try:
-                    job.done = (db.query(ScraperJobDomain)
-                                .filter(ScraperJobDomain.job_id == job_id,
-                                        ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
-                                .count())
-                    job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
-                    job.updated_at = datetime.utcnow(); db.commit()
-                except Exception:
-                    pass
+                        pass
 
             db.refresh(job)
             if job.status != "stopped":
@@ -199,7 +191,7 @@ def _run(job_id: int):
         try:
             job = db.get(ScraperJob, job_id)
             if job:
-                job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
+                job.status = "completed"; db.commit()
         except Exception:
             pass
     finally:

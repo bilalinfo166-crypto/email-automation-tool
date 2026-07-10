@@ -15,9 +15,9 @@ from bs4 import BeautifulSoup
 
 from .compliance import domain_has_mx
 
-TIMEOUT = 8
-TIMEOUT_QUICK = 4     # faster for guessed pages
-MAX_PAGES = 12
+TIMEOUT = 6
+TIMEOUT_QUICK = 3     # guessed pages — fast fail
+MAX_PAGES = 8
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # Reusable session for connection pooling (much faster)
@@ -94,13 +94,9 @@ VENDOR_KEYWORDS = {
 }
 
 GUESSED_PAGES = [
-    "/contact", "/contact-us", "/about", "/about-us", "/get-in-touch",
-    "/contacto", "/kontakt", "/impressum", "/advertise", "/advertising",
-    "/partnerships", "/team", "/our-team", "/support", "/help",
-    "/write-for-us", "/guest-post", "/contribute", "/submit-article",
-    "/submit-a-guest-post", "/submit", "/blog", "/sponsor", "/sponsors",
-    "/media-kit", "/press", "/editorial", "/authors", "/writers",
-    "/privacy-policy", "/terms",
+    "/contact", "/contact-us", "/about", "/about-us",
+    "/advertise", "/write-for-us", "/guest-post",
+    "/blog", "/team", "/support",
 ]
 
 
@@ -296,7 +292,7 @@ def extract_domain(domain, mode="vendor"):
             pages.append(u)
 
     all_pages = [base]
-    for page in pages[:MAX_PAGES + 8]:
+    for page in pages[:MAX_PAGES]:
         html = _fetch(page, timeout=TIMEOUT_QUICK)
         if html:
             all_pages.append(page)
