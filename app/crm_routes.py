@@ -273,18 +273,20 @@ def warmup_run(max_sends: int = 10, db: Session = Depends(get_db)):
     return warmup.run_warmup(db, max_sends)
 
 
-# ---------------- compliance dashboard ----------------
+# ---------------- compliance dashboard + full stats ----------------
 
 @router.get("/dashboard")
 def compliance_dashboard(mode: str = "", db: Session = Depends(get_db)):
-    # mode-aware totals: only count events for campaigns in this mode
+    from .crm_models import EventLog, ScraperJob, ScraperResult
+    from .database import Sender
+
+    # mode-aware campaign totals
     cq = db.query(Campaign)
     if mode:
         cq = cq.filter(Campaign.mode == mode)
     campaign_ids = [c.id for c in cq.all()]
 
     totals = {"sent": 0, "opened": 0, "replied": 0, "failed": 0, "unsubscribed": 0, "not_interested": 0}
-    from .crm_models import EventLog
     eq = db.query(EventLog)
     if mode:
         eq = eq.filter(EventLog.campaign_id.in_(campaign_ids or [-1]))
@@ -295,6 +297,29 @@ def compliance_dashboard(mode: str = "", db: Session = Depends(get_db)):
     contacts_q = db.query(Contact)
     if mode:
         contacts_q = contacts_q.filter(Contact.mode == mode)
+
+    # scraper stats (mode-aware)
+    scraper_q = db.query(ScraperJob)
+    if mode:
+        scraper_q = scraper_q.filter(ScraperJob.mode == mode)
+    scraper_jobs_all = scraper_q.all()
+    total_scraped_emails = sum(j.emails_found for j in scraper_jobs_all)
+    total_domains_scraped = sum(j.total for j in scraper_jobs_all)
+
+    # per-sender stats
+    senders = db.query(Sender).all()
+    sender_stats = []
+    for s in senders:
+        sender_sent = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "sent").count()
+        sender_failed = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "failed").count()
+        sender_replied = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "replied").count()
+        sender_stats.append({
+            "id": s.id, "email": s.email, "name": s.name or s.email.split("@")[0],
+            "method": s.method, "health": s.health, "status": s.status,
+            "sent": sender_sent, "failed": sender_failed, "replied": sender_replied,
+            "sent_today": s.sent_today, "total_sent": s.total_sent, "daily_cap": s.daily_cap,
+        })
+
     prof = compliance.get_profile(db)
     return {
         "mode": mode or "all",
@@ -309,4 +334,52 @@ def compliance_dashboard(mode: str = "", db: Session = Depends(get_db)):
         "campaigns": len(campaign_ids),
         "approved_campaigns": cq.filter(Campaign.status.in_(["approved", "sending", "completed"])).count(),
         "unsubscribe_rate": round(totals["unsubscribed"] / totals["sent"] * 100, 2) if totals["sent"] else 0.0,
+        "scraper": {
+            "total_jobs": len(scraper_jobs_all),
+            "total_domains": total_domains_scraped,
+            "total_emails_found": total_scraped_emails,
+        },
+        "sender_stats": sender_stats,
     }
+
+
+@router.get("/stats/scraper-history")
+def scraper_history(mode: str = "", db: Session = Depends(get_db)):
+    """All scraper jobs with their results — for the expandable stats view."""
+    from .crm_models import ScraperJob, ScraperResult
+    q = db.query(ScraperJob)
+    if mode:
+        q = q.filter(ScraperJob.mode == mode)
+    jobs = q.order_by(ScraperJob.id.desc()).all()
+    out = []
+    for j in jobs:
+        results = db.query(ScraperResult).filter(ScraperResult.job_id == j.id).all()
+        out.append({
+            "id": j.id, "name": j.name, "mode": j.mode, "status": j.status,
+            "total": j.total, "done": j.done, "emails_found": j.emails_found,
+            "created_at": j.created_at.isoformat(),
+            "emails": [{"email": r.email, "domain": r.domain, "email_type": r.email_type,
+                        "confidence": r.confidence, "source_url": r.source_url}
+                       for r in results],
+        })
+    return out
+
+
+@router.get("/stats/sender-history")
+def sender_history(db: Session = Depends(get_db)):
+    """Per-sender detailed send log — for expandable sender stats."""
+    from .crm_models import EventLog
+    from .database import Sender
+    senders = db.query(Sender).all()
+    out = []
+    for s in senders:
+        events = (db.query(EventLog).filter(EventLog.sender_id == s.id)
+                  .order_by(EventLog.id.desc()).limit(200).all())
+        out.append({
+            "id": s.id, "email": s.email, "name": s.name or s.email.split("@")[0],
+            "method": s.method, "health": s.health, "status": s.status,
+            "total_sent": s.total_sent, "sent_today": s.sent_today, "daily_cap": s.daily_cap,
+            "events": [{"type": e.type, "campaign_id": e.campaign_id,
+                        "created_at": e.created_at.isoformat()} for e in events],
+        })
+    return out
