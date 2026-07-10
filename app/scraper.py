@@ -132,6 +132,8 @@ def _fetch(url, timeout=None):
     try:
         r = requests.get(url, timeout=timeout or TIMEOUT, allow_redirects=True,
                          headers={"User-Agent": USER_AGENT})
+        if r.status_code >= 400:
+            return None  # 404, 403 etc. = page doesn't exist
         ctype = r.headers.get("content-type", "")
         if "text/html" not in ctype and "text" not in ctype:
             return None
@@ -193,14 +195,9 @@ def _confidence(source_url):
 
 
 def _detect_vendor_signals(all_html, all_pages):
-    combined = all_html.lower()
-    urls_text = " ".join(all_pages).lower()
+    """Only report signals for pages that ACTUALLY LOADED (not 404).
+    all_pages only contains URLs that _fetch returned successfully."""
     signals = {}
-    for sig, keywords in VENDOR_KEYWORDS.items():
-        found = [kw for kw in keywords if kw in combined or kw in urls_text]
-        if found:
-            signals[sig] = True
-    # detect specific pages WITH their URLs (for clickable links)
     for url in all_pages:
         p = urlparse(url).path.lower()
         if any(k in p for k in ["write-for-us", "guest-post", "contribute", "submit"]):
