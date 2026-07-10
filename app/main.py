@@ -32,6 +32,26 @@ app.include_router(scraper_router)
 @app.on_event("startup")
 def _startup():
     init_db()
+    # Recover interrupted scraper jobs (server crashed/restarted while running)
+    try:
+        from .database import SessionLocal
+        from .crm_models import ScraperJob, ScraperJobDomain
+        db = SessionLocal()
+        # Find jobs that were "running" when server stopped
+        interrupted = db.query(ScraperJob).filter(ScraperJob.status == "running").all()
+        for job in interrupted:
+            # Reset "scraping" domains back to "pending" so they can be re-processed
+            db.query(ScraperJobDomain).filter(
+                ScraperJobDomain.job_id == job.id,
+                ScraperJobDomain.status == "scraping"
+            ).update({"status": "pending"})
+            job.status = "stopped"  # user can click Resume
+        if interrupted:
+            db.commit()
+            print(f"Recovered {len(interrupted)} interrupted scraper job(s) — click Resume to continue.")
+        db.close()
+    except Exception as e:
+        print(f"Job recovery warning: {e}")
 
 
 def _reset_daily(s: Sender):

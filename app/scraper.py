@@ -15,10 +15,14 @@ from bs4 import BeautifulSoup
 
 from .compliance import domain_has_mx
 
-TIMEOUT = 10          # more time for slow sites
-TIMEOUT_QUICK = 6     # for guessed pages that may 404
-MAX_PAGES = 12        # check more pages
+TIMEOUT = 8
+TIMEOUT_QUICK = 4     # faster for guessed pages
+MAX_PAGES = 12
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Reusable session for connection pooling (much faster)
+_session = requests.Session()
+_session.headers.update({"User-Agent": USER_AGENT})
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 IGNORE_ENDINGS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js", ".ico", ".pdf")
@@ -130,10 +134,9 @@ def _deobfuscate(text):
 
 def _fetch(url, timeout=None):
     try:
-        r = requests.get(url, timeout=timeout or TIMEOUT, allow_redirects=True,
-                         headers={"User-Agent": USER_AGENT})
+        r = _session.get(url, timeout=timeout or TIMEOUT, allow_redirects=True)
         if r.status_code >= 400:
-            return None  # 404, 403 etc. = page doesn't exist
+            return None
         ctype = r.headers.get("content-type", "")
         if "text/html" not in ctype and "text" not in ctype:
             return None
@@ -235,6 +238,39 @@ def _business_pages(base_url, root, html):
     return uniq[:MAX_PAGES]
 
 
+def _find_facebook_email(home_html, root):
+    """FALLBACK: if no email found on the site, try the site's Facebook page.
+    Find the FB link from the site, fetch the FB page, extract any email."""
+    fb_links = re.findall(r'https?://(?:www\.)?facebook\.com/[a-zA-Z0-9._\-]+', home_html)
+    if not fb_links:
+        return []
+    fb_url = fb_links[0]
+    # Try the /about page on Facebook (more likely to show contact info)
+    about_url = fb_url.rstrip("/") + "/about"
+    contacts = []
+    for url in [about_url, fb_url]:
+        html = _fetch(url, timeout=TIMEOUT_QUICK)
+        if not html:
+            continue
+        for e in _emails_from_html(html):
+            e = e.lower().strip(".")
+            if _is_junk(e):
+                continue
+            if _is_nav_blocked(e.split("@")[-1]):
+                continue
+            contacts.append({
+                "email": e, "domain": root, "source_url": url,
+                "role_based": any(e.split("@")[0].startswith(p) for p in ROLE_PREFIXES),
+                "mx_ok": domain_has_mx(e.split("@")[-1]),
+                "email_type": _classify_email(e, root),
+                "confidence": "medium",
+                "domain_match": (e.split("@")[-1] == root),
+            })
+        if contacts:
+            break
+    return contacts
+
+
 def extract_domain(domain, mode="vendor"):
     root = _root_domain(domain)
     if not root or _is_nav_blocked(root):
@@ -245,7 +281,6 @@ def extract_domain(domain, mode="vendor"):
     if home is None:
         home = _fetch("http://" + root)
     if home is None:
-        # try with www
         home = _fetch("https://www." + root)
     if home is None:
         return {"domain": root, "contacts": [], "status": "site not reachable", "vendor_signals": {}}
@@ -254,9 +289,7 @@ def extract_domain(domain, mode="vendor"):
     raw = _emails_from_html(home)
     source = {e: base for e in raw}
 
-    # Discovered pages from homepage links
     pages = _business_pages(base, root, home)
-    # Add guessed common pages
     for path in GUESSED_PAGES:
         u = base + path
         if u not in pages:
@@ -273,10 +306,9 @@ def extract_domain(domain, mode="vendor"):
                     source[e] = page
             raw |= set(source.keys())
 
-    # Vendor signals
     vendor_signals = _detect_vendor_signals(all_html, all_pages) if mode == "vendor" else {}
 
-    # Build contacts — accept ALL emails found (domain, free-provider, cross-domain)
+    # Build contacts
     contacts = []
     seen = set()
     for e in sorted(raw):
@@ -288,7 +320,6 @@ def extract_domain(domain, mode="vendor"):
         seen.add(e)
         if _is_junk(e):
             continue
-        # Don't accept emails FROM social/nav-blocked domains
         if _is_nav_blocked(dom):
             continue
 
@@ -300,17 +331,17 @@ def extract_domain(domain, mode="vendor"):
         domain_match = (dom == root or dom.endswith("." + root))
 
         contacts.append({
-            "email": e,
-            "domain": root,
-            "source_url": src,
-            "role_based": is_role,
-            "mx_ok": mx,
-            "email_type": email_type,
-            "confidence": conf,
-            "domain_match": domain_match,
+            "email": e, "domain": root, "source_url": src,
+            "role_based": is_role, "mx_ok": mx, "email_type": email_type,
+            "confidence": conf, "domain_match": domain_match,
         })
 
-    # SMART SORT: domain-match > high-confidence > role-based > domain_email > free > cross
+    # FALLBACK: if no emails found, try the site's Facebook page
+    if not contacts:
+        fb_contacts = _find_facebook_email(all_html, root)
+        contacts.extend(fb_contacts)
+
+    # SMART SORT
     conf_order = {"high": 0, "medium": 1, "low": 2}
     type_order = {"domain_email": 0, "free_provider_email": 1, "cross_domain_email": 2}
     contacts.sort(key=lambda c: (

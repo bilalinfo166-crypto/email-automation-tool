@@ -112,6 +112,26 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     db.commit()
 
 
+def _scrape_with_retry(domain: str, mode: str = "vendor", retries: int = 2) -> dict:
+    """Try scraping up to `retries` times on failure."""
+    for attempt in range(retries):
+        try:
+            result = scraper.extract_domain(domain, mode=mode)
+            status = result.get("status", "")
+            # If site not reachable on first try, retry
+            if "not reachable" in status and attempt < retries - 1:
+                continue
+            return result
+        except Exception as e:
+            if attempt < retries - 1:
+                continue
+            return {"contacts": [], "status": f"error: {type(e).__name__}", "vendor_signals": {}}
+    return {"contacts": [], "status": "error: max retries", "vendor_signals": {}}
+
+
+CHUNK_SIZE = 50  # process in chunks of 50 for memory safety on 10k+ jobs
+
+
 def _run(job_id: int):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     db = SessionLocal()
@@ -123,36 +143,65 @@ def _run(job_id: int):
         limit = job.max_per_domain or 2
         mode = job.mode or "vendor"
 
-        # Continuous pool: submit ALL pending domains at once, process as they complete
         pool = ThreadPoolExecutor(max_workers=WORKERS)
         try:
-            all_domains = (db.query(ScraperJobDomain)
-                          .filter(ScraperJobDomain.job_id == job_id,
-                                  ScraperJobDomain.status == "pending").all())
-            for jd in all_domains:
-                jd.status = "scraping"; jd.last_checked = datetime.utcnow()
-            db.commit()
-
-            futures = {pool.submit(_scrape_one, jd.domain, mode): jd for jd in all_domains}
-            for fut in as_completed(futures):
+            while True:
                 db.refresh(job)
                 if job.status == "stopped":
-                    pool.shutdown(wait=False, cancel_futures=True)
                     break
-                jd = futures[fut]
-                _save_result(db, job, jd, fut.result(), limit)
-                job.done = (db.query(ScraperJobDomain)
-                            .filter(ScraperJobDomain.job_id == job_id,
-                                    ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
-                            .count())
-                job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
-                job.updated_at = datetime.utcnow(); db.commit()
+
+                # Grab next chunk of pending domains
+                chunk = (db.query(ScraperJobDomain)
+                         .filter(ScraperJobDomain.job_id == job_id,
+                                 ScraperJobDomain.status == "pending")
+                         .limit(CHUNK_SIZE).all())
+                if not chunk:
+                    break  # all done
+
+                for jd in chunk:
+                    jd.status = "scraping"; jd.last_checked = datetime.utcnow()
+                db.commit()
+
+                # Submit chunk to pool — as each finishes, result saves immediately
+                futures = {pool.submit(_scrape_with_retry, jd.domain, mode): jd for jd in chunk}
+                for fut in as_completed(futures):
+                    try:
+                        db.refresh(job)
+                        if job.status == "stopped":
+                            pool.shutdown(wait=False, cancel_futures=True)
+                            break
+                        jd = futures[fut]
+                        try:
+                            result = fut.result()
+                        except Exception:
+                            result = {"contacts": [], "status": "error: thread crash", "vendor_signals": {}}
+                        _save_result(db, job, jd, result, limit)
+                    except Exception:
+                        pass  # never crash the whole job for one domain
+
+                # Update job counters after each chunk
+                try:
+                    job.done = (db.query(ScraperJobDomain)
+                                .filter(ScraperJobDomain.job_id == job_id,
+                                        ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
+                                .count())
+                    job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
+                    job.updated_at = datetime.utcnow(); db.commit()
+                except Exception:
+                    pass
 
             db.refresh(job)
             if job.status != "stopped":
                 job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
         finally:
             pool.shutdown(wait=False)
+    except Exception:
+        try:
+            job = db.get(ScraperJob, job_id)
+            if job:
+                job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
+        except Exception:
+            pass
     finally:
         db.close()
         _threads.pop(job_id, None)
