@@ -15,9 +15,10 @@ from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DOMAIN_BUDGET = 15    # max seconds per domain (fast!)
-PAGE_TIMEOUT = 5      # per-page timeout
-MAX_PAGES = 5         # only check 5 pages max
+DOMAIN_BUDGET = 20    # max seconds per domain — enough for slow sites
+PAGE_TIMEOUT = 10     # homepage timeout (slow sites need this)
+PAGE_TIMEOUT_QUICK = 5  # subsequent pages
+MAX_PAGES = 8         # check more pages when email not found
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 _s = requests.Session()
@@ -53,8 +54,8 @@ BLOCKED = {"facebook.com","fb.com","linkedin.com","instagram.com","twitter.com",
            "x.com","youtube.com","t.me","wa.me","reddit.com","quora.com","medium.com"}
 
 # Priority pages (most likely to have emails)
-P1_PATHS = ["/contact","/contact-us","/about","/about-us"]
-P2_PATHS = ["/blog","/advertise","/write-for-us","/guest-post","/team"]
+P1_PATHS = ["/contact","/contact-us","/about","/about-us","/privacy","/privacy-policy"]
+P2_PATHS = ["/blog","/advertise","/write-for-us","/guest-post","/team","/support","/terms","/legal","/imprint"]
 
 HI_KW = ["contact","contact-us","get-in-touch","write-for-us","guest-post","advertise"]
 MD_KW = ["about","about-us","team","blog","support","privacy","terms"]
@@ -167,7 +168,8 @@ def _conf(src):
     if p in ("","/"): return "medium"
     return "low"
 
-def _sigs(pages):
+def _sigs(pages, homepage_html=None, base=""):
+    """Detect signals from loaded pages + homepage links (so completed sites also show signals)."""
     s={}
     for u in pages:
         p=urlparse(u).path.lower()
@@ -175,6 +177,23 @@ def _sigs(pages):
         if any(k in p for k in ["advertise","advertising","sponsor","media-kit"]): s["advertise_page"]=u
         if "/blog" in p or "/articles" in p or "/news" in p: s["blog_page"]=u
         if "contact" in p: s["contact_page"]=u
+    # Also scan homepage links (header/footer/nav) for signals even if we didn't load those pages
+    if homepage_html and base:
+        try:
+            soup=BeautifulSoup(homepage_html,"html.parser")
+            for a in soup.find_all("a",href=True):
+                href=a["href"].strip()
+                full=urljoin(base,href)
+                txt=(href+" "+a.get_text(" ")).lower()
+                if any(k in txt for k in ["write-for-us","guest-post","contribute","submit a post"]):
+                    if "write_for_us_page" not in s: s["write_for_us_page"]=full
+                if any(k in txt for k in ["advertise","advertising","sponsor","media kit"]):
+                    if "advertise_page" not in s: s["advertise_page"]=full
+                if "blog" in txt or "/blog" in href.lower():
+                    if "blog_page" not in s: s["blog_page"]=full
+                if "contact" in txt or "/contact" in href.lower():
+                    if "contact_page" not in s: s["contact_page"]=full
+        except: pass
     return s
 
 def _discover(base,root,html_text):
@@ -221,28 +240,29 @@ def extract_domain(domain, mode="vendor"):
     # Discover internal links from homepage
     discovered=_discover(base,root,home)
 
-    # 2) If no email yet, try P1 pages (contact, about)
-    if not emails and not done():
+    # 2) Try P1 pages (contact, about, privacy)
+    #    If email found → STOP immediately. If not → keep going.
+    if not done():
         p1=[]
         for path in P1_PATHS:
             u=base+path
             if u not in p1: p1.append(u)
         for u in discovered:
             p=urlparse(u).path.lower()
-            if any(k in p for k in ["contact","about"]) and u not in p1: p1.append(u)
+            if any(k in p for k in ["contact","about","privacy"]) and u not in p1: p1.append(u)
 
-        for pg in p1[:3]:
+        for pg in p1[:4]:
             if done(): break
-            h=_get(pg, min(PAGE_TIMEOUT, budget()))
+            h=_get(pg, min(PAGE_TIMEOUT_QUICK, budget()))
             if h:
                 loaded.append(pg)
                 new=_extract(h)
                 for e in new:
                     if e not in source: source[e]=pg
                 emails|=new
-                if emails: break  # EARLY EXIT — email found!
+                if emails: break  # EMAIL FOUND → STOP, move to next domain
 
-    # 3) If STILL no email, try P2 pages (blog, advertise, write-for-us)
+    # 3) If STILL no email, try P2 pages — DON'T give up, use remaining budget
     if not emails and not done():
         p2=[]
         for path in P2_PATHS:
@@ -250,21 +270,21 @@ def extract_domain(domain, mode="vendor"):
             if u not in p2: p2.append(u)
         for u in discovered:
             p=urlparse(u).path.lower()
-            if any(k in p for k in ["blog","advertise","write","guest","team"]) and u not in p2: p2.append(u)
+            if any(k in p for k in ["blog","advertise","write","guest","team","support","terms","legal"]) and u not in p2: p2.append(u)
 
         for pg in p2[:MAX_PAGES-len(loaded)]:
             if done(): break
-            h=_get(pg, min(PAGE_TIMEOUT, budget()))
+            h=_get(pg, min(PAGE_TIMEOUT_QUICK, budget()))
             if h:
                 loaded.append(pg)
                 new=_extract(h)
                 for e in new:
                     if e not in source: source[e]=pg
                 emails|=new
-                if emails: break  # EARLY EXIT
+                if emails: break  # EMAIL FOUND → STOP
 
     # Vendor signals (lightweight — just checks loaded page URLs)
-    vs=_sigs(loaded) if mode=="vendor" else {}
+    vs=_sigs(loaded, home, base) if mode=="vendor" else {}
 
     # Client category
     cat=""

@@ -106,6 +106,14 @@ def restart_job(job_id: int, mode: str = "", db: Session = Depends(get_db)):
     return {"status": j.status}
 
 
+@router.post("/jobs/{job_id}/retry-failed")
+def retry_failed_job(job_id: int, mode: str = "", db: Session = Depends(get_db)):
+    """Re-try all no_email and failed domains. Keeps existing found emails."""
+    _owned(db, job_id, mode)
+    result = scraper_jobs.retry_failed(db, job_id)
+    return result or {"error": "not found"}
+
+
 @router.get("/jobs/{job_id}/export")
 def export_job(job_id: int, format: str = "csv", mode: str = "", db: Session = Depends(get_db)):
     _owned(db, job_id, mode)
