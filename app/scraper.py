@@ -25,7 +25,7 @@ _s = requests.Session()
 _s.headers.update({"User-Agent": UA})
 _s.verify = False
 
-EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,4}")
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,10}")
 
 ROLE_PFX = ["info","contact","sales","hello","support","office","admin","enquiry",
             "help","team","mail","marketing","editor","editorial","press","media",
@@ -141,20 +141,7 @@ def _extract(html_text):
                     found|=set(EMAIL_RE.findall(_deob(val)))
     except: pass
 
-    # Validate + clean — STRICT filtering
-    VALID_TLDS = {"com","org","net","io","co","uk","de","fr","es","it","nl","be","at","ch",
-                  "au","ca","us","in","br","mx","ar","cl","jp","kr","cn","ru","pl","se",
-                  "no","dk","fi","pt","cz","ro","hu","bg","hr","sk","si","lt","lv","ee",
-                  "ie","nz","za","ng","ke","gh","eg","pk","bd","ph","th","vn","id","my",
-                  "sg","tw","hk","ae","sa","qa","il","tr","ua","by","kz","info","biz",
-                  "me","tv","cc","ai","app","dev","tech","blog","site","store","shop",
-                  "online","club","xyz","pro","name","mobi","asia","tel","edu","gov","mil",
-                  "int","coop","museum","health","vip","top","link","work","live","news",
-                  "agency","studio","design","digital","media","group","solutions","cloud",
-                  "email","marketing","consulting","global","world","zone","network","center",
-                  "systems","team","space","life","market","money","fund","capital","exchange",
-                  "company","enterprises","industries","ventures","partners","associates",
-                  "foundation","institute","academy","university","school","college","hospital"}
+    # Validate + clean — fast, accurate filtering
     PLACEHOLDER_LOCALS = {"exemple","example","test","demo","sample","placeholder","yourname",
                           "youremail","email","name","user","admin","your","you","me","my",
                           "someone","anybody","person","company","domain","website","site"}
@@ -166,22 +153,15 @@ def _extract(html_text):
         if not dom or not local: continue
         if ".." in dom or ".." in local: continue
         if len(local)>40 or len(dom)>40: continue
-        # TLD validation
         tld=dom.rsplit(".",1)[-1]
-        if len(tld)>6 or len(tld)<2: continue
-        if tld not in VALID_TLDS and len(tld)>3: continue  # unknown long TLDs rejected
-        # Domain format
-        if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,6}$',dom): continue
-        # Reject domains with numbers in weird places (337-216-4423.inte, 70.he)
+        if len(tld)>10 or len(tld)<2: continue  # generous TLD length
+        if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,10}$',dom): continue
+        # Reject all-numeric domain part (337-216-4423.inte)
         parts=dom.rsplit(".",1)
-        if re.match(r'^[\d.\-]+$',parts[0]): continue  # all-numeric domain part
-        # Local part format
+        if re.match(r'^[\d.\-]+$',parts[0]): continue
         if not re.match(r'^[a-z0-9][a-z0-9._+\-]*$',local): continue
-        # Reject numeric-only local parts (1768088168@qq.com)
-        if re.match(r'^\d+$',local): continue
-        # Reject placeholder/example locals
+        if re.match(r'^\d+$',local): continue  # numeric-only local
         if local in PLACEHOLDER_LOCALS: continue
-        # Junk patterns
         if any(p.search(e) for p in JUNK_RE): continue
         if _blocked(dom): continue
         clean.add(e)
@@ -240,6 +220,211 @@ def _discover(base,root,html_text):
     for p in pages:
         if p not in seen: seen.add(p); uniq.append(p)
     return uniq
+
+
+def _classify_site(html_text, base_url):
+    """Weighted multi-signal website classifier.
+    Analyzes: title, meta description, H1, JSON-LD, nav links, footer, body text.
+    Returns (category, confidence_pct). 'Unknown' if confidence < 70%."""
+
+    CATEGORIES = {
+        "SaaS": {"strong":["saas","software as a service","cloud platform","subscription software","cloud-based"],
+                 "medium":["platform","dashboard","analytics tool","automation tool","crm","erp"],
+                 "weak":["software","app","solution","monthly plan"]},
+        "AI": {"strong":["artificial intelligence","machine learning","ai platform","deep learning","nlp","computer vision","generative ai","llm","large language model"],
+               "medium":["ai-powered","ai tool","neural network","chatbot","ai assistant"],
+               "weak":["ai","intelligent","smart"]},
+        "SEO": {"strong":["seo agency","search engine optimization","seo services","seo tool","link building","keyword research"],
+                "medium":["seo","backlink","serp","organic traffic","rank tracking"],
+                "weak":["ranking","search","optimization"]},
+        "Marketing Agency": {"strong":["marketing agency","digital marketing agency","performance marketing","growth agency","advertising agency"],
+                            "medium":["digital marketing","content marketing","social media marketing","ppc management","media buying"],
+                            "weak":["marketing","campaign","lead generation"]},
+        "Web Design": {"strong":["web design agency","website design","ui/ux design","web development agency","design studio"],
+                       "medium":["web design","ux design","ui design","responsive design","website builder"],
+                       "weak":["design","creative","layout"]},
+        "Software Development": {"strong":["software development company","custom software","app development","mobile development","web development company"],
+                                 "medium":["development","engineering","full-stack","backend","frontend","devops"],
+                                 "weak":["developer","code","programming"]},
+        "Developer Tools": {"strong":["developer tools","dev tools","sdk","api platform","code editor","ide"],
+                           "medium":["api","cli","framework","library","open source","documentation","github"],
+                           "weak":["developer","build","deploy"]},
+        "API": {"strong":["api platform","api gateway","api management","rest api","graphql"],
+                "medium":["api","endpoint","webhook","integration","microservice"],
+                "weak":["connect","integrate"]},
+        "Cybersecurity": {"strong":["cybersecurity","information security","penetration testing","threat detection","soc","siem"],
+                         "medium":["security","firewall","encryption","vulnerability","malware","zero trust"],
+                         "weak":["protection","secure","safety"]},
+        "FinTech": {"strong":["fintech","financial technology","payment platform","digital banking","neobank"],
+                    "medium":["payment","transaction","lending","cryptocurrency exchange","trading platform"],
+                    "weak":["finance","money","banking"]},
+        "Healthcare": {"strong":["healthcare","health tech","telemedicine","electronic health record","patient portal","clinical"],
+                       "medium":["health","medical","hospital","clinic","patient","diagnosis","therapy"],
+                       "weak":["care","wellness","treatment"]},
+        "Dental": {"strong":["dental clinic","dentist","dental practice","orthodontics","dental care"],
+                   "medium":["dental","teeth","oral health","dentistry"],
+                   "weak":["smile","tooth"]},
+        "Legal": {"strong":["law firm","attorney","legal services","lawyer","legal practice","litigation"],
+                  "medium":["legal","counsel","paralegal","court","lawsuit","compliance"],
+                  "weak":["law","justice"]},
+        "Education": {"strong":["online education","e-learning","edtech","learning platform","online course","lms"],
+                      "medium":["education","training","tutorial","course","certification","academy","school"],
+                      "weak":["learn","teach","study"]},
+        "University": {"strong":["university","college","campus","faculty","admissions","undergraduate","postgraduate"],
+                       "medium":["academic","research","professor","department","scholarship"],
+                       "weak":["degree","semester"]},
+        "Non-profit": {"strong":["non-profit","nonprofit","charity","foundation","ngo","donate"],
+                       "medium":["mission","volunteer","cause","community impact","social good"],
+                       "weak":["help","support","give"]},
+        "Government": {"strong":["government","gov","public sector","municipality","federal","state department"],
+                       "medium":["public service","civic","regulation","policy","citizen"],
+                       "weak":["official","department"]},
+        "News": {"strong":["news","newspaper","breaking news","journalism","newsroom"],
+                 "medium":["reporter","headline","press","editorial","correspondent"],
+                 "weak":["latest","today","update"]},
+        "Blog": {"strong":["blog","personal blog","blogging","blogger","wordpress blog"],
+                 "medium":["article","post","author","opinion","write","contributor"],
+                 "weak":["read","story"]},
+        "Media": {"strong":["media company","publishing","media house","broadcast","podcast network"],
+                  "medium":["media","magazine","publication","journal","podcast","video"],
+                  "weak":["content","channel"]},
+        "Food": {"strong":["restaurant","food delivery","catering","recipe","cookbook","food blog"],
+                 "medium":["food","meal","cuisine","chef","menu","dining","bakery","cafe"],
+                 "weak":["eat","taste","delicious"]},
+        "Travel": {"strong":["travel agency","tour operator","hotel booking","flight booking","travel blog"],
+                   "medium":["travel","hotel","resort","tourism","destination","vacation","booking"],
+                   "weak":["trip","explore","adventure"]},
+        "Fashion": {"strong":["fashion brand","clothing line","fashion blog","apparel","fashion design"],
+                    "medium":["fashion","clothing","outfit","style","wear","collection","designer"],
+                    "weak":["trend","look"]},
+        "Beauty": {"strong":["beauty brand","cosmetics","skincare","beauty salon","makeup"],
+                   "medium":["beauty","skin","hair","nail","spa","cosmetic"],
+                   "weak":["glow","natural"]},
+        "Photography": {"strong":["photography studio","photographer","photo gallery","wedding photography"],
+                        "medium":["photography","photo","portrait","shoot","camera","lens"],
+                        "weak":["picture","image"]},
+        "Real Estate": {"strong":["real estate","property listing","realty","real estate agent","property management"],
+                        "medium":["property","apartment","house","rent","mortgage","listing","broker"],
+                        "weak":["home","land","building"]},
+        "Automotive": {"strong":["automotive","car dealer","auto repair","vehicle","car dealership"],
+                       "medium":["car","auto","motor","vehicle","driving","garage"],
+                       "weak":["drive","road"]},
+        "Manufacturing": {"strong":["manufacturing","factory","industrial","production line","fabrication"],
+                          "medium":["manufacture","industrial","supply chain","warehouse","assembly"],
+                          "weak":["produce","material"]},
+        "E-commerce": {"strong":["e-commerce platform","online store","shopify store","add to cart","buy now","checkout"],
+                       "medium":["shop","store","buy","price","cart","order","shipping","product catalog"],
+                       "weak":["product","sale"]},
+        "Marketplace": {"strong":["marketplace","buy and sell","peer to peer","classified","auction"],
+                        "medium":["marketplace","listing","seller","buyer","vendor","bid"],
+                        "weak":["sell","list"]},
+        "Finance": {"strong":["financial services","investment firm","wealth management","accounting firm","bookkeeping"],
+                    "medium":["finance","investment","accounting","tax","audit","portfolio"],
+                    "weak":["money","fund"]},
+        "HR": {"strong":["hr software","human resources","hris","people management","employee engagement"],
+               "medium":["hr","payroll","recruitment","talent","workforce","onboarding"],
+               "weak":["employee","team","hire"]},
+        "Recruitment": {"strong":["recruitment agency","staffing","job board","career portal","headhunting"],
+                        "medium":["recruitment","job","career","hiring","talent acquisition","resume"],
+                        "weak":["position","vacancy"]},
+        "Insurance": {"strong":["insurance company","insurance broker","insurtech","policy","premium","coverage"],
+                      "medium":["insurance","insure","claim","underwriting","risk"],
+                      "weak":["protect","cover"]},
+        "Sports": {"strong":["sports","athletic","fitness center","gym","sports team","stadium"],
+                   "medium":["sport","fitness","workout","training","athlete","coach"],
+                   "weak":["play","game","match"]},
+        "Gaming": {"strong":["gaming","video game","game studio","esports","game development"],
+                   "medium":["game","gamer","play","console","steam","multiplayer"],
+                   "weak":["level","score"]},
+        "Crypto": {"strong":["cryptocurrency","blockchain","bitcoin","ethereum","defi","web3","nft"],
+                   "medium":["crypto","token","wallet","mining","decentralized","smart contract"],
+                   "weak":["coin","chain"]},
+        "Hosting": {"strong":["web hosting","cloud hosting","vps","dedicated server","hosting provider"],
+                    "medium":["hosting","server","domain","ssl","cpanel","uptime"],
+                    "weak":["host","bandwidth"]},
+        "WordPress": {"strong":["wordpress theme","wordpress plugin","wordpress developer","wordpress agency"],
+                      "medium":["wordpress","wp","theme","plugin","elementor","woocommerce"],
+                      "weak":["cms","template"]},
+        "Business Services": {"strong":["business consulting","management consulting","advisory","b2b services"],
+                              "medium":["consulting","business","enterprise","corporate","strategy","outsourcing"],
+                              "weak":["service","professional","client"]},
+    }
+
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except:
+        return ("Unknown", 0)
+
+    # Extract signals with different weights
+    title = (soup.title.string or "").lower() if soup.title else ""
+    meta_desc = ""
+    for tag in soup.find_all("meta", attrs={"name": re.compile(r"description", re.I)}):
+        meta_desc = (tag.get("content", "") or "").lower()
+    h1 = " ".join(h.get_text(" ", strip=True).lower() for h in soup.find_all("h1")[:3])
+
+    # JSON-LD type
+    jsonld_type = ""
+    for sc in soup.find_all("script", type="application/ld+json"):
+        if sc.string:
+            for t in re.findall(r'"@type"\s*:\s*"([^"]+)"', sc.string):
+                jsonld_type += " " + t.lower()
+
+    # Nav links text
+    nav_text = ""
+    for nav in soup.find_all(["nav", "header", "footer"]):
+        nav_text += " " + nav.get_text(" ", strip=True).lower()
+
+    # Body text (first 3000 chars for speed)
+    body = soup.get_text(" ", strip=True).lower()[:3000]
+
+    # URL keywords
+    url_text = base_url.lower()
+
+    # Score each category
+    scores = {}
+    for cat_name, kw_groups in CATEGORIES.items():
+        score = 0
+        # Strong keywords in title/H1/meta = very high signal
+        for kw in kw_groups.get("strong", []):
+            if kw in title: score += 30
+            if kw in h1: score += 25
+            if kw in meta_desc: score += 20
+            if kw in jsonld_type: score += 25
+            if kw in url_text: score += 15
+            if kw in nav_text: score += 10
+            if kw in body: score += 5
+        # Medium keywords
+        for kw in kw_groups.get("medium", []):
+            if kw in title: score += 15
+            if kw in h1: score += 12
+            if kw in meta_desc: score += 10
+            if kw in jsonld_type: score += 12
+            if kw in nav_text: score += 5
+            if kw in body: score += 3
+        # Weak keywords (low weight — avoid false positives)
+        for kw in kw_groups.get("weak", []):
+            if kw in title: score += 5
+            if kw in h1: score += 4
+            if kw in meta_desc: score += 3
+            if kw in body: score += 1
+        if score > 0:
+            scores[cat_name] = score
+
+    if not scores:
+        return ("Unknown", 0)
+
+    # Pick top category
+    top = max(scores, key=scores.get)
+    top_score = scores[top]
+
+    # Normalize confidence (0-100%)
+    # A strong match typically scores 50-150+, weak <30
+    confidence = min(100, int(top_score * 1.5))
+
+    if confidence < 70:
+        return ("Unknown", confidence)
+
+    return (top, confidence)
 
 
 def extract_domain(domain, mode="vendor"):
@@ -314,25 +499,10 @@ def extract_domain(domain, mode="vendor"):
     # Vendor signals (lightweight — just checks loaded page URLs)
     vs=_sigs(loaded, home, base) if mode=="vendor" else {}
 
-    # Client category
-    cat=""
+    # Client category — WEIGHTED MULTI-SIGNAL CLASSIFIER
+    cat=""; cat_confidence=0
     if mode=="client":
-        t=home.lower()
-        cats=[
-            (["e-commerce","ecommerce","shop","store","product"],"E-commerce"),
-            (["saas","software","platform","api"],"SaaS/Tech"),
-            (["agency","marketing","seo","digital","branding"],"Agency"),
-            (["blog","magazine","news","media","journal"],"Blog/Media"),
-            (["health","medical","clinic","doctor"],"Health"),
-            (["finance","fintech","bank","investment"],"Finance"),
-            (["education","course","training","learn"],"Education"),
-            (["real estate","property","realty"],"Real Estate"),
-            (["food","restaurant","recipe"],"Food"),
-            (["travel","hotel","tour","flight"],"Travel"),
-        ]
-        for kws,lbl in cats:
-            if any(k in t for k in kws): cat=lbl; break
-        if not cat: cat="Business"
+        cat, cat_confidence = _classify_site(home, base)
 
     # Build contacts
     contacts=[]
@@ -354,4 +524,4 @@ def extract_domain(domain, mode="vendor"):
     elapsed=round(time.time()-start,1)
     return {"domain":root,"contacts":contacts,
             "status":"scraped" if contacts else "no_email_in_public_pages",
-            "vendor_signals":vs,"client_category":cat,"elapsed":elapsed}
+            "vendor_signals":vs,"client_category":cat,"client_confidence":cat_confidence,"elapsed":elapsed}

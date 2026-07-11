@@ -88,10 +88,11 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     # Save vendor signals OR client category
     vs = result.get("vendor_signals", {})
     cat = result.get("client_category", "")
+    cat_conf = result.get("client_confidence", 0)
     if vs:
         jd.vendor_signals = json.dumps(vs)
     elif cat:
-        jd.vendor_signals = json.dumps({"category": cat})
+        jd.vendor_signals = json.dumps({"category": cat, "confidence": cat_conf})
     if not contacts:
         jd.status = "failed" if ("reach" in status_text or "skip" in status_text or "error" in status_text) else "no_email"
         jd.error = status_text if jd.status == "failed" else ""
