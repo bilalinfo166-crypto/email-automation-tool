@@ -91,8 +91,12 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     cat_conf = result.get("client_confidence", 0)
     if vs:
         jd.vendor_signals = json.dumps(vs)
-    elif cat:
-        jd.vendor_signals = json.dumps({"category": cat, "confidence": cat_conf})
+    if cat:
+        # Always store category (even for vendor mode, append to signals)
+        existing = json.loads(jd.vendor_signals) if jd.vendor_signals else {}
+        existing["category"] = cat
+        existing["confidence"] = cat_conf
+        jd.vendor_signals = json.dumps(existing)
     if not contacts:
         jd.status = "failed" if ("reach" in status_text or "skip" in status_text or "error" in status_text) else "no_email"
         jd.error = status_text if jd.status == "failed" else ""

@@ -54,8 +54,11 @@ BLOCKED = {"facebook.com","fb.com","linkedin.com","instagram.com","twitter.com",
            "x.com","youtube.com","t.me","wa.me","reddit.com","quora.com","medium.com"}
 
 # Priority pages (most likely to have emails)
-P1_PATHS = ["/contact","/contact-us","/about","/about-us","/privacy","/privacy-policy"]
-P2_PATHS = ["/blog","/advertise","/write-for-us","/guest-post","/team","/support","/terms","/legal","/imprint"]
+P1_PATHS = ["/contact","/contact-us","/about","/about-us","/privacy","/privacy-policy",
+            "/legal/privacy-policy","/legal/privacy","/legal","/legal-notice"]
+P2_PATHS = ["/blog","/advertise","/write-for-us","/guest-post","/team","/support",
+            "/terms","/terms-and-conditions","/legal/terms","/legal/terms-and-condition",
+            "/imprint","/disclaimer","/cookie-policy","/impressum"]
 
 HI_KW = ["contact","contact-us","get-in-touch","write-for-us","guest-post","advertise"]
 MD_KW = ["about","about-us","team","blog","support","privacy","terms"]
@@ -144,7 +147,9 @@ def _extract(html_text):
     # Validate + clean — fast, accurate filtering
     PLACEHOLDER_LOCALS = {"exemple","example","test","demo","sample","placeholder","yourname",
                           "youremail","email","name","user","admin","your","you","me","my",
-                          "someone","anybody","person","company","domain","website","site"}
+                          "someone","anybody","person","company","domain","website","site",
+                          "jane","john","johndoe","janedoe","firstname","lastname","username",
+                          "abc","xyz","foo","bar","baz","dummy","fake","null","undefined"}
     clean=set()
     for e in found:
         e=e.lower().strip(".")
@@ -162,6 +167,11 @@ def _extract(html_text):
         if not re.match(r'^[a-z0-9][a-z0-9._+\-]*$',local): continue
         if re.match(r'^\d+$',local): continue  # numeric-only local
         if local in PLACEHOLDER_LOCALS: continue
+        # Reject placeholder domains
+        PLACEHOLDER_DOMS = {"company.com","domain.com","website.com","site.com","yoursite.com",
+                           "yourdomain.com","yourcompany.com","business.com","mysite.com",
+                           "mycompany.com","mydomain.com","samplesite.com","testsite.com"}
+        if dom in PLACEHOLDER_DOMS: continue
         if any(p.search(e) for p in JUNK_RE): continue
         if _blocked(dom): continue
         clean.add(e)
@@ -206,7 +216,9 @@ def _sigs(pages, homepage_html=None, base=""):
 
 def _discover(base,root,html_text):
     soup=BeautifulSoup(html_text,"html.parser")
-    hints=["contact","about","team","blog","write-for-us","guest-post","advertise"]
+    hints=["contact","about","team","blog","write-for-us","guest-post","advertise",
+           "privacy","terms","legal","press","media","editorial","imprint","disclaimer",
+           "support","help","partnerships","cookie"]
     pages=[]
     for a in soup.find_all("a",href=True):
         href=a["href"].strip()
@@ -214,12 +226,13 @@ def _discover(base,root,html_text):
         full=urljoin(base,href)
         h=urlparse(full).netloc.lower()
         if _blocked(h) or not _same(root,full): continue
-        txt=(href+" "+a.get_text(" ")).lower()
-        if any(k in txt for k in hints): pages.append(full.split("#")[0])
-    seen=set(); uniq=[]
-    for p in pages:
-        if p not in seen: seen.add(p); uniq.append(p)
-    return uniq
+        url_path=urlparse(full).path.lower()
+        link_text=a.get_text(" ").lower()
+        combined=url_path+" "+link_text+" "+href.lower()
+        if any(k in combined for k in hints):
+            clean=full.split("#")[0].split("?")[0]
+            if clean not in pages: pages.append(clean)
+    return pages[:MAX_PAGES]
 
 
 def _classify_site(html_text, base_url):
@@ -421,7 +434,7 @@ def _classify_site(html_text, base_url):
     # A strong match typically scores 50-150+, weak <30
     confidence = min(100, int(top_score * 1.5))
 
-    if confidence < 70:
+    if confidence < 40:
         return ("Unknown", confidence)
 
     return (top, confidence)
