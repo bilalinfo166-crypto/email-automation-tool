@@ -133,17 +133,15 @@ def _scrape_with_retry(domain: str, mode: str = "vendor") -> dict:
 CHUNK_SIZE = 100  # grab more at once since pool handles them continuously
 
 
-MAX_RETRIES = 3  # retry failed domains up to 3 times automatically
+MAX_RETRIES = 3
 
 
 def _run(job_id: int):
-    """Streaming worker with AUTO-RETRY.
-    Pass 1: try all domains.
-    Pass 2-3: automatically retry no_email + failed domains.
-    Only marks "no email" after all retries exhausted."""
+    """Streaming worker with INTERLEAVED retry.
+    Failed/no_email domains go back to END of queue immediately.
+    Retry happens DURING the campaign, not after."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from collections import deque
-    import time as _time
     db = SessionLocal()
     try:
         job = db.get(ScraperJob, job_id)
@@ -152,88 +150,77 @@ def _run(job_id: int):
         limit = job.max_per_domain or 2
         mode = job.mode or "vendor"
 
+        # Track retry counts per domain_id
+        retry_count = {}
+
+        pending_ids = deque(
+            jd.id for jd in db.query(ScraperJobDomain.id)
+            .filter(ScraperJobDomain.job_id == job_id, ScraperJobDomain.status == "pending").all()
+        )
+        if not pending_ids:
+            job.status = "completed"; db.commit(); return
+
         pool = ThreadPoolExecutor(max_workers=WORKERS)
+        futures = {}
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            db.refresh(job)
-            if job.status == "stopped": break
-
-            # Get pending domains (pass 1) or failed domains (pass 2+)
-            if attempt == 1:
-                pending_ids = deque(
-                    jd.id for jd in db.query(ScraperJobDomain.id)
-                    .filter(ScraperJobDomain.job_id == job_id,
-                            ScraperJobDomain.status == "pending").all()
-                )
-            else:
-                # Re-queue failed and no_email domains for another try
-                retry_domains = db.query(ScraperJobDomain).filter(
-                    ScraperJobDomain.job_id == job_id,
-                    ScraperJobDomain.status.in_(["no_email", "failed"])
-                ).all()
-                if not retry_domains: break  # all found or completed!
-                for jd in retry_domains:
-                    jd.status = "pending"; jd.error = ""
+        def _submit_next():
+            while pending_ids:
+                did = pending_ids.popleft()
+                jd = db.get(ScraperJobDomain, did)
+                if not jd or jd.status not in ("pending","failed","no_email"): continue
+                jd.status = "scraping"; jd.last_checked = datetime.utcnow()
                 db.commit()
-                pending_ids = deque(jd.id for jd in retry_domains)
-                # Small delay between retries (let slow sites recover)
-                _time.sleep(2)
+                fut = pool.submit(_scrape_with_retry, jd.domain, mode)
+                futures[fut] = did
+                return True
+            return False
 
-            if not pending_ids: break
+        # Fill pool
+        for _ in range(min(WORKERS, len(pending_ids))):
+            _submit_next()
 
-            futures = {}
+        while futures:
+            db.refresh(job)
+            if job.status == "stopped":
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
 
-            def _submit_next():
-                while pending_ids:
-                    did = pending_ids.popleft()
-                    jd = db.get(ScraperJobDomain, did)
-                    if not jd or jd.status != "pending": continue
-                    jd.status = "scraping"; jd.last_checked = datetime.utcnow()
-                    db.commit()
-                    fut = pool.submit(_scrape_with_retry, jd.domain, mode)
-                    futures[fut] = did
-                    return True
-                return False
+            done_fut = next(iter(as_completed(futures)))
+            did = futures.pop(done_fut)
 
-            # Fill pool
-            for _ in range(min(WORKERS, len(pending_ids))):
-                _submit_next()
+            try:
+                jd = db.get(ScraperJobDomain, did)
+                if jd:
+                    try:
+                        result = done_fut.result()
+                    except Exception:
+                        result = {"contacts":[],"status":"error","vendor_signals":{}}
+                    _save_result(db, job, jd, result, limit)
 
-            # Process as they complete
-            while futures:
-                db.refresh(job)
-                if job.status == "stopped":
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    break
+                    # If failed/no_email and retries left, put back at END of queue
+                    if jd.status in ("failed","no_email"):
+                        rc = retry_count.get(did, 0) + 1
+                        retry_count[did] = rc
+                        if rc < MAX_RETRIES:
+                            jd.status = "pending"; jd.error = ""
+                            db.commit()
+                            pending_ids.append(did)  # back to end of queue
+            except Exception:
+                pass
 
-                done_fut = next(iter(as_completed(futures)))
-                did = futures.pop(done_fut)
+            # Update counters (only count truly done domains — not pending retries)
+            try:
+                job.done = (db.query(ScraperJobDomain)
+                            .filter(ScraperJobDomain.job_id == job_id,
+                                    ScraperJobDomain.status.in_(["completed","failed","no_email"]))
+                            .count())
+                job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
+                job.updated_at = datetime.utcnow(); db.commit()
+            except Exception:
+                pass
 
-                try:
-                    jd = db.get(ScraperJobDomain, did)
-                    if jd:
-                        try:
-                            result = done_fut.result()
-                        except Exception:
-                            result = {"contacts":[],"status":"error","vendor_signals":{}}
-                        _save_result(db, job, jd, result, limit)
-                except Exception:
-                    pass
+            _submit_next()
 
-                # Update counters
-                try:
-                    job.done = (db.query(ScraperJobDomain)
-                                .filter(ScraperJobDomain.job_id == job_id,
-                                        ScraperJobDomain.status.in_(["completed","failed","no_email"]))
-                                .count())
-                    job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
-                    job.updated_at = datetime.utcnow(); db.commit()
-                except Exception:
-                    pass
-
-                _submit_next()
-
-        # Final status
         db.refresh(job)
         if job.status != "stopped":
             job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()

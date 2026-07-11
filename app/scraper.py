@@ -141,19 +141,47 @@ def _extract(html_text):
                     found|=set(EMAIL_RE.findall(_deob(val)))
     except: pass
 
-    # Validate + clean
+    # Validate + clean — STRICT filtering
+    VALID_TLDS = {"com","org","net","io","co","uk","de","fr","es","it","nl","be","at","ch",
+                  "au","ca","us","in","br","mx","ar","cl","jp","kr","cn","ru","pl","se",
+                  "no","dk","fi","pt","cz","ro","hu","bg","hr","sk","si","lt","lv","ee",
+                  "ie","nz","za","ng","ke","gh","eg","pk","bd","ph","th","vn","id","my",
+                  "sg","tw","hk","ae","sa","qa","il","tr","ua","by","kz","info","biz",
+                  "me","tv","cc","ai","app","dev","tech","blog","site","store","shop",
+                  "online","club","xyz","pro","name","mobi","asia","tel","edu","gov","mil",
+                  "int","coop","museum","health","vip","top","link","work","live","news",
+                  "agency","studio","design","digital","media","group","solutions","cloud",
+                  "email","marketing","consulting","global","world","zone","network","center",
+                  "systems","team","space","life","market","money","fund","capital","exchange",
+                  "company","enterprises","industries","ventures","partners","associates",
+                  "foundation","institute","academy","university","school","college","hospital"}
+    PLACEHOLDER_LOCALS = {"exemple","example","test","demo","sample","placeholder","yourname",
+                          "youremail","email","name","user","admin","your","you","me","my",
+                          "someone","anybody","person","company","domain","website","site"}
     clean=set()
     for e in found:
         e=e.lower().strip(".")
-        if len(e)>60: continue
+        if len(e)>60 or len(e)<5: continue
         local,_,dom=e.partition("@")
         if not dom or not local: continue
         if ".." in dom or ".." in local: continue
         if len(local)>40 or len(dom)>40: continue
+        # TLD validation
         tld=dom.rsplit(".",1)[-1]
-        if len(tld)>4: continue
+        if len(tld)>6 or len(tld)<2: continue
+        if tld not in VALID_TLDS and len(tld)>3: continue  # unknown long TLDs rejected
+        # Domain format
+        if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,6}$',dom): continue
+        # Reject domains with numbers in weird places (337-216-4423.inte, 70.he)
+        parts=dom.rsplit(".",1)
+        if re.match(r'^[\d.\-]+$',parts[0]): continue  # all-numeric domain part
+        # Local part format
         if not re.match(r'^[a-z0-9][a-z0-9._+\-]*$',local): continue
-        if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,4}$',dom): continue
+        # Reject numeric-only local parts (1768088168@qq.com)
+        if re.match(r'^\d+$',local): continue
+        # Reject placeholder/example locals
+        if local in PLACEHOLDER_LOCALS: continue
+        # Junk patterns
         if any(p.search(e) for p in JUNK_RE): continue
         if _blocked(dom): continue
         clean.add(e)
