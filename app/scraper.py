@@ -15,9 +15,9 @@ from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DOMAIN_BUDGET = 20    # max seconds per domain — enough for slow sites
-PAGE_TIMEOUT = 10     # homepage timeout (slow sites need this)
-PAGE_TIMEOUT_QUICK = 5  # subsequent pages
+DOMAIN_BUDGET = 15    # max seconds per domain
+PAGE_TIMEOUT = 6      # homepage timeout
+PAGE_TIMEOUT_QUICK = 3  # subsequent pages
 MAX_PAGES = 8         # check more pages when email not found
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
