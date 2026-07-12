@@ -45,21 +45,14 @@ def _calc_workers(total_domains: int) -> int:
 
 
 def _check_resources() -> float:
-    """Return a scaling factor (0.0–1.0) based on CPU/RAM usage.
-    1.0 = resources fine, <1.0 = reduce workers proportionally."""
+    """Non-blocking resource check. Returns scaling factor 0.5–1.0."""
     try:
         import psutil
-        cpu = psutil.cpu_percent(interval=0.1)
+        cpu = psutil.cpu_percent(interval=None)  # non-blocking (last sample)
         ram = psutil.virtual_memory().percent
-        if cpu > 90 or ram > 90:
-            return 0.5  # halve workers
-        if cpu > 85 or ram > 85:
-            return 0.7  # reduce 30%
-        if cpu > 75 or ram > 80:
-            return 0.85
+        if cpu > 90 or ram > 90: return 0.5
+        if cpu > 85 or ram > 85: return 0.7
         return 1.0
-    except ImportError:
-        return 1.0  # psutil not installed — no throttling
     except Exception:
         return 1.0
 
@@ -166,15 +159,6 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
                              email_type=c.get("email_type", "domain_email"),
                              confidence=c.get("confidence", "medium")))
         kept += 1
-        # AUTO-ADD to outreach send list (no duplicates)
-        from .crm_models import OutreachEntry
-        exists = db.query(OutreachEntry).filter(
-            OutreachEntry.mode == job.mode, OutreachEntry.email == email).first()
-        if not exists:
-            db.add(OutreachEntry(mode=job.mode, email=email, domain=jd.domain,
-                email_type=c.get("email_type", "domain_email"),
-                confidence=c.get("confidence", "medium"),
-                source_url=c.get("source_url", "")))
     jd.status = "completed" if kept else "no_email"
     jd.source_url = valid[0].get("source_url", "") if valid else ""
     db.commit()
