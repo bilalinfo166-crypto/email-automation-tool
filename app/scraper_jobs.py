@@ -29,19 +29,8 @@ _threads: dict[int, threading.Thread] = {}
 
 
 def _calc_workers(total_domains: int) -> int:
-    """Dynamic worker count based on domain count."""
-    if total_domains <= 100:
-        return 20
-    elif total_domains <= 500:
-        return 35
-    elif total_domains <= 1000:
-        return 50
-    elif total_domains <= 5000:
-        return 75
-    elif total_domains <= 20000:
-        return 100
-    else:
-        return 125
+    """50 workers at all times."""
+    return 50
 
 
 def _check_resources() -> float:
@@ -233,19 +222,11 @@ def _run(job_id: int):
         for _ in range(min(workers, len(pending_ids))):
             _submit_next()
 
-        # Dynamic retry: large jobs = fewer retries (speed over coverage)
         max_retries = 1 if total > 1000 else (2 if total > 200 else MAX_RETRIES)
         completed_since_update = 0
-        update_every = 10 if total > 500 else 5  # batch counter updates
+        update_every = 10 if total > 500 else 3
 
         while futures:
-            # Check job status only every N completions (not every single one)
-            if completed_since_update >= update_every:
-                db.refresh(job)
-                if job.status == "stopped":
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    break
-
             done_fut = next(iter(as_completed(futures)))
             did = futures.pop(done_fut)
 
@@ -257,8 +238,8 @@ def _run(job_id: int):
                     except Exception:
                         result = {"contacts":[],"status":"error","vendor_signals":{}}
                     _save_result(db, job, jd, result, limit)
+                    db.commit()  # ALWAYS commit so emails appear immediately
 
-                    # Retry failed domains (fewer retries for large jobs)
                     if jd.status in ("failed","no_email"):
                         rc = retry_count.get(did, 0) + 1
                         retry_count[did] = rc
@@ -271,9 +252,13 @@ def _run(job_id: int):
 
             completed_since_update += 1
 
-            # Batch counter update (every N completions, not every 1)
+            # Heavy counter queries only every N completions (fast)
             if completed_since_update >= update_every:
                 try:
+                    db.refresh(job)
+                    if job.status == "stopped":
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
                     job.done = (db.query(ScraperJobDomain)
                                 .filter(ScraperJobDomain.job_id == job_id,
                                         ScraperJobDomain.status.in_(["completed","failed","no_email"]))
@@ -288,6 +273,15 @@ def _run(job_id: int):
 
         db.refresh(job)
         if job.status != "stopped":
+            # Clean up: any domains still "pending" or "scraping" → mark as no_email
+            db.query(ScraperJobDomain).filter(
+                ScraperJobDomain.job_id == job_id,
+                ScraperJobDomain.status.in_(["pending","scraping"])
+            ).update({"status": "no_email"}, synchronize_session=False)
+            job.done = db.query(ScraperJobDomain).filter(
+                ScraperJobDomain.job_id == job_id,
+                ScraperJobDomain.status.in_(["completed","failed","no_email"])).count()
+            job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
             job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
         pool.shutdown(wait=False)
     except Exception:
