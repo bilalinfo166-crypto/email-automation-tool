@@ -85,6 +85,22 @@ def delete_sender(sender_id: int, db: Session = Depends(get_db)):
     return {"deleted": sender_id}
 
 
+@app.put("/senders/{sender_id}")
+def update_sender(sender_id: int, data: dict, db: Session = Depends(get_db)):
+    s = db.get(Sender, sender_id)
+    if not s:
+        raise HTTPException(404, "Sender not found")
+    if "name" in data:
+        s.name = data["name"]
+    if "daily_cap" in data:
+        s.daily_cap = max(20, min(200, int(data["daily_cap"])))
+    if "warmup" in data:
+        s.warmup = bool(data["warmup"])
+    db.commit()
+    db.refresh(s)
+    return {"id": s.id, "email": s.email, "name": s.name, "daily_cap": s.daily_cap, "warmup": s.warmup}
+
+
 @app.post("/senders/app-password", response_model=schemas.SenderOut)
 def add_app_password_sender(data: schemas.AppPasswordSenderIn, db: Session = Depends(get_db)):
     if db.query(Sender).filter(Sender.email == data.email).first():
