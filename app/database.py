@@ -34,6 +34,7 @@ class Sender(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
     name: Mapped[str] = mapped_column(String, default="")
+    mode: Mapped[str] = mapped_column(String, default="vendor")  # vendor / client
     method: Mapped[str] = mapped_column(String)          # "oauth" or "app_password"
 
     # secrets (encrypted). Only one is used depending on method.

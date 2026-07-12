@@ -63,8 +63,11 @@ def _reset_daily(s: Sender):
 # ---------------- Senders ----------------
 
 @app.get("/senders", response_model=list[schemas.SenderOut])
-def list_senders(db: Session = Depends(get_db)):
-    return db.query(Sender).order_by(Sender.created_at.desc()).all()
+def list_senders(mode: str = "", db: Session = Depends(get_db)):
+    q = db.query(Sender)
+    if mode:
+        q = q.filter(Sender.mode == mode)
+    return q.order_by(Sender.created_at.desc()).all()
 
 
 @app.get("/senders/{sender_id}", response_model=schemas.SenderOut)
@@ -122,6 +125,7 @@ def add_app_password_sender(data: schemas.AppPasswordSenderIn, db: Session = Dep
     s = Sender(
         email=data.email,
         name=data.name or data.email.split("@")[0].title(),
+        mode=getattr(data, 'mode', 'vendor') or 'vendor',
         method="app_password",
         app_password=security.encrypt(data.app_password),
         daily_cap=20 if data.warmup else data.daily_cap,

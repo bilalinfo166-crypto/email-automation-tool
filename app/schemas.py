@@ -21,6 +21,7 @@ class AppPasswordSenderIn(BaseModel):
     app_password: str
     daily_cap: int = 150
     warmup: bool = True
+    mode: str = "vendor"
 
     @field_validator("email")
     @classmethod
