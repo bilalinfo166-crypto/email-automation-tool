@@ -383,3 +383,89 @@ def sender_history(db: Session = Depends(get_db)):
                         "created_at": e.created_at.isoformat()} for e in events],
         })
     return out
+
+
+# ============ OUTREACH SHEET (Campaign Send List) ============
+
+@router.post("/outreach/add-from-scraper")
+def add_scraper_results_to_outreach(job_id: int, mode: str = "vendor", db: Session = Depends(get_db)):
+    """Add all emails from a scraper job to the outreach sheet. No duplicates."""
+    from .crm_models import ScraperResult, OutreachEntry
+    results = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).all()
+    added = 0
+    for r in results:
+        exists = db.query(OutreachEntry).filter(
+            OutreachEntry.mode == mode, OutreachEntry.email == r.email).first()
+        if not exists:
+            db.add(OutreachEntry(mode=mode, email=r.email, domain=r.domain,
+                email_type=r.email_type, confidence=r.confidence, source_url=r.source_url))
+            added += 1
+    db.commit()
+    return {"added": added, "total": db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()}
+
+
+@router.get("/outreach/list")
+def list_outreach(mode: str = "vendor", page: int = 1, limit: int = 100, db: Session = Depends(get_db)):
+    """Paginated outreach sheet with live status."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+    total = q.count()
+    entries = q.order_by(OutreachEntry.id.desc()).offset((page-1)*limit).limit(limit).all()
+    return {
+        "total": total, "page": page, "limit": limit,
+        "entries": [{"id":e.id,"email":e.email,"domain":e.domain,"email_type":e.email_type,
+                     "confidence":e.confidence,"source_url":e.source_url,"status":e.status,
+                     "sent_at":e.sent_at.isoformat() if e.sent_at else None,
+                     "opened_at":e.opened_at.isoformat() if e.opened_at else None,
+                     "replied_at":e.replied_at.isoformat() if e.replied_at else None,
+                     "sender_email":e.sender_email,"subject":e.subject,
+                     "created_at":e.created_at.isoformat()} for e in entries]
+    }
+
+
+@router.get("/outreach/stats")
+def outreach_stats(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Live stats for the outreach sheet."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+    total = q.count()
+    sent = q.filter(OutreachEntry.status.in_(["sent","opened","replied"])).count()
+    opened = q.filter(OutreachEntry.status.in_(["opened","replied"])).count()
+    replied = q.filter(OutreachEntry.status == "replied").count()
+    bounced = q.filter(OutreachEntry.status == "bounced").count()
+    pending = q.filter(OutreachEntry.status == "pending").count()
+    return {"total":total,"pending":pending,"sent":sent,"opened":opened,
+            "replied":replied,"bounced":bounced,
+            "open_rate":round(opened/max(1,sent)*100,1),
+            "reply_rate":round(replied/max(1,sent)*100,1)}
+
+
+@router.get("/outreach/export")
+def export_outreach(mode: str = "vendor", format: str = "csv", db: Session = Depends(get_db)):
+    """Export outreach sheet as CSV or Excel."""
+    from .crm_models import OutreachEntry
+    from fastapi.responses import Response
+    entries = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).order_by(OutreachEntry.id).all()
+    if format == "xlsx":
+        from openpyxl import Workbook
+        from io import BytesIO
+        wb = Workbook(); ws = wb.active
+        ws.append(["Email","Domain","Type","Confidence","Status","Sent","Opened","Replied","Source","Added"])
+        for e in entries:
+            ws.append([e.email,e.domain,e.email_type,e.confidence,e.status,
+                       str(e.sent_at or ""),str(e.opened_at or ""),str(e.replied_at or ""),
+                       e.source_url,str(e.created_at)])
+        buf = BytesIO(); wb.save(buf); buf.seek(0)
+        return Response(content=buf.read(),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition":"attachment; filename=outreach.xlsx"})
+    # CSV
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Email","Domain","Type","Confidence","Status","Sent","Opened","Replied","Source","Added"])
+    for e in entries:
+        w.writerow([e.email,e.domain,e.email_type,e.confidence,e.status,
+                    e.sent_at or "",e.opened_at or "",e.replied_at or "",e.source_url,e.created_at])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition":"attachment; filename=outreach.csv"})

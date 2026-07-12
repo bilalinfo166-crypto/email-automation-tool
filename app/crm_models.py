@@ -136,3 +136,23 @@ class ScraperResult(Base):
     confidence: Mapped[str] = mapped_column(String, default="medium")        # high / medium / low
     source_url: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class OutreachEntry(Base):
+    """Campaign sheet — unique emails to send, with live status tracking."""
+    __tablename__ = "outreach_entries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String, default="vendor", index=True)
+    email: Mapped[str] = mapped_column(String, index=True)
+    domain: Mapped[str] = mapped_column(String, default="")
+    email_type: Mapped[str] = mapped_column(String, default="domain_email")
+    confidence: Mapped[str] = mapped_column(String, default="medium")
+    source_url: Mapped[str] = mapped_column(String, default="")
+    # Status tracking
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending/sent/opened/replied/bounced/unsubscribed
+    sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    replied_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    sender_email: Mapped[str] = mapped_column(String, default="")  # which sender sent this
+    subject: Mapped[str] = mapped_column(String, default="")
+    days_since_sent: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
