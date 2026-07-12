@@ -1,0 +1,560 @@
+"""CRM API: domains, compliant scraping, contacts, suppression, campaigns
+(with the review->approve compliance gate), queue, sending, and analytics."""
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from .database import get_db
+from .crm_models import Domain, Contact, Suppression, Campaign, QueueItem, CompanyProfile
+from . import compliance, scraper, campaign_engine, replies, warmup
+
+router = APIRouter(prefix="/crm", tags=["crm"])
+
+
+# ---------------- company profile (one-time) ----------------
+
+class ProfileIn(BaseModel):
+    company_name: str
+    website_url: str
+    business_address: str
+    sender_name: str
+    reply_to_email: str
+
+
+@router.get("/company-profile")
+def get_company_profile(db: Session = Depends(get_db)):
+    p = compliance.get_profile(db)
+    if not p:
+        return {"completed": False, "missing": [m for _, m in compliance.REQUIRED_PROFILE_FIELDS]}
+    return {"completed": p.completed, "company_name": p.company_name, "website_url": p.website_url,
+            "business_address": p.business_address, "sender_name": p.sender_name,
+            "reply_to_email": p.reply_to_email, "missing": compliance.profile_missing(p)}
+
+
+@router.post("/company-profile")
+def save_company_profile(data: ProfileIn, db: Session = Depends(get_db)):
+    if not compliance.valid_email(data.reply_to_email):
+        raise HTTPException(400, "Reply-to email is not valid.")
+    p = db.get(CompanyProfile, 1)
+    if not p:
+        p = CompanyProfile(id=1)
+        db.add(p)
+    for k, v in data.model_dump().items():
+        setattr(p, k, v.strip())
+    p.completed = len(compliance.profile_missing(p)) == 0
+    db.commit()
+    return {"completed": p.completed, "missing": compliance.profile_missing(p)}
+
+
+# ---------------- domains + scraping ----------------
+
+class DomainsIn(BaseModel):
+    domains: list[str]
+    mode: str = "vendor"
+
+
+@router.post("/domains")
+def upload_domains(data: DomainsIn, db: Session = Depends(get_db)):
+    added = 0
+    for raw in data.domains:
+        d = raw.strip().lower().replace("www.", "")
+        if not d:
+            continue
+        if not db.query(Domain).filter(Domain.domain == d).first():
+            db.add(Domain(domain=d, mode=data.mode))
+            added += 1
+    db.commit()
+    return {"added": added}
+
+
+@router.post("/scrape")
+def run_scrape(mode: str = "vendor", limit: int = 50, db: Session = Depends(get_db)):
+    """Scrape this mode's pending domains for their OWN published business addresses.
+    Dedups against existing contacts and skips suppressed emails."""
+    pending = (db.query(Domain)
+               .filter(Domain.status == "pending", Domain.mode == mode)
+               .limit(limit).all())
+    total_contacts = 0
+    for dom in pending:
+        result = scraper.extract_domain(dom.domain)
+        found = 0
+        for c in result["contacts"]:
+            email = c["email"]
+            if compliance.is_suppressed(db, email):
+                continue
+            if db.query(Contact).filter(Contact.email == email).first():
+                continue  # dedup
+            db.add(Contact(email=email, domain=c["domain"], mode=dom.mode,
+                           source_url=c["source_url"],
+                           role_based=c["role_based"], mx_ok=c["mx_ok"]))
+            found += 1
+        dom.status = result["status"] if not result["contacts"] else "scraped"
+        dom.contacts_found = found
+        total_contacts += found
+        db.commit()
+    return {"domains_processed": len(pending), "new_contacts": total_contacts}
+
+
+@router.get("/contacts")
+def list_contacts(mode: str = "", db: Session = Depends(get_db)):
+    q = db.query(Contact)
+    if mode:
+        q = q.filter(Contact.mode == mode)
+    rows = q.all()
+    return [{"id": c.id, "email": c.email, "domain": c.domain, "mode": c.mode,
+             "role_based": c.role_based, "mx_ok": c.mx_ok, "status": c.status,
+             "source_url": c.source_url} for c in rows]
+
+
+# ---------------- suppression ----------------
+
+class SuppressIn(BaseModel):
+    email: str
+    reason: str = "manual"
+
+
+@router.post("/suppression")
+def add_suppress(data: SuppressIn, db: Session = Depends(get_db)):
+    if not compliance.valid_email(data.email):
+        raise HTTPException(400, "Invalid email")
+    compliance.add_suppression(db, data.email, data.reason)
+    return {"suppressed": data.email.lower()}
+
+
+@router.get("/suppression")
+def list_suppress(db: Session = Depends(get_db)):
+    return [{"email": s.email, "reason": s.reason} for s in db.query(Suppression).all()]
+
+
+# ---------------- campaigns + compliance gate ----------------
+
+class CampaignIn(BaseModel):
+    name: str
+    mode: str = "vendor"
+    subject: str = ""
+    from_name: str = ""
+    company: str = ""
+    postal_address: str = ""
+    reason_for_contact: str = ""
+    body_html: str = ""
+    unsubscribe_url: str = ""
+    per_sender_daily_cap: int = 100
+    min_delay_sec: int = 25
+    max_delay_sec: int = 60
+
+
+@router.post("/campaigns")
+def create_campaign(data: CampaignIn, db: Session = Depends(get_db)):
+    c = Campaign(**data.model_dump())
+    db.add(c); db.commit(); db.refresh(c)
+    return {"id": c.id, "status": c.status, "mode": c.mode}
+
+
+@router.get("/campaigns")
+def list_campaigns(mode: str = "", db: Session = Depends(get_db)):
+    q = db.query(Campaign)
+    if mode:
+        q = q.filter(Campaign.mode == mode)
+    return [{"id": c.id, "name": c.name, "mode": c.mode, "status": c.status,
+             "lawful_basis_confirmed": c.lawful_basis_confirmed} for c in q.all()]
+
+
+@router.post("/campaigns/{cid}/review")
+def review_campaign(cid: int, db: Session = Depends(get_db)):
+    """Campaign review step: reports what's missing before it can be approved."""
+    c = db.get(Campaign, cid)
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    prof_miss = compliance.profile_missing(compliance.get_profile(db))
+    miss = compliance.missing_fields(c)
+    ready = not miss and not prof_miss
+    if ready:
+        c.status = "pending_review"; db.commit()
+    return {"ready_to_approve": ready, "missing_campaign_fields": miss,
+            "missing_company_profile": prof_miss,
+            "needs_lawful_basis_confirmation": not c.lawful_basis_confirmed}
+
+
+class ApproveIn(BaseModel):
+    lawful_basis_confirmed: bool = False
+
+
+@router.post("/campaigns/{cid}/approve")
+def approve_campaign(cid: int, data: ApproveIn, db: Session = Depends(get_db)):
+    """Hard gate: approval requires all fields present AND explicit lawful-basis confirmation."""
+    c = db.get(Campaign, cid)
+    if not c:
+        raise HTTPException(404, "Campaign not found")
+    miss = compliance.missing_fields(c)
+    if miss:
+        raise HTTPException(400, "Cannot approve — missing: " + ", ".join(miss))
+    if not data.lawful_basis_confirmed:
+        raise HTTPException(400, "You must confirm you have a lawful basis / permission to contact these businesses.")
+    c.lawful_basis_confirmed = True
+    c.status = "approved"
+    db.commit()
+    return {"id": c.id, "status": c.status}
+
+
+@router.post("/campaigns/{cid}/build-queue")
+def build_queue(cid: int, db: Session = Depends(get_db)):
+    try:
+        return campaign_engine.build_queue(db, cid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/campaigns/{cid}/send-batch")
+def send_batch(cid: int, batch_size: int = 20, db: Session = Depends(get_db)):
+    try:
+        return campaign_engine.send_batch(db, cid, batch_size)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/campaigns/{cid}/analytics")
+def campaign_analytics(cid: int, db: Session = Depends(get_db)):
+    return campaign_engine.analytics(db, cid)
+
+
+# ---------------- replies + opt-out ----------------
+
+@router.post("/replies/scan")
+def scan_replies(db: Session = Depends(get_db)):
+    """Read OAuth senders' inboxes; log replies and auto-handle opt-outs."""
+    return replies.scan_replies(db)
+
+
+class ManualReplyIn(BaseModel):
+    email: str
+    text: str
+
+
+@router.post("/replies/manual")
+def manual_reply(data: ManualReplyIn, db: Session = Depends(get_db)):
+    """Record a reply by hand (e.g. for app-password senders). Applies opt-out wording."""
+    contact = db.query(Contact).filter(Contact.email == data.email.lower()).first()
+    if not contact:
+        raise HTTPException(404, "Contact not found")
+    cid = replies._campaign_for(db, contact.id)
+    status = replies.apply_reply(db, contact, cid, 0, data.text)
+    return {"email": contact.email, "status": status}
+
+
+@router.get("/campaigns/{cid}/recipients")
+def campaign_recipients(cid: int, db: Session = Depends(get_db)):
+    """Live status per recipient for the campaign table."""
+    label = {"new": "Queued", "queued": "Queued", "sent": "Sent", "failed": "Failed",
+             "replied": "Replied", "unsubscribed": "Unsubscribed", "not_interested": "Not Interested"}
+    out = []
+    items = db.query(QueueItem).filter(QueueItem.campaign_id == cid).all()
+    for it in items:
+        ct = db.get(Contact, it.contact_id)
+        if not ct:
+            continue
+        # contact-level status (replied/unsub/not_interested) wins over queue status
+        status = ct.status if ct.status in ("replied", "unsubscribed", "not_interested") else it.status
+        out.append({"email": ct.email, "status": label.get(status, status.title()),
+                    "sent_at": it.sent_at.isoformat() if it.sent_at else None})
+    return out
+
+
+# ---------------- warmup ----------------
+
+@router.get("/warmup/status")
+def warmup_status(db: Session = Depends(get_db)):
+    return warmup.warmup_status(db)
+
+
+@router.post("/warmup/run")
+def warmup_run(max_sends: int = 10, db: Session = Depends(get_db)):
+    """Send a small batch of warmup emails between the user's own connected inboxes."""
+    return warmup.run_warmup(db, max_sends)
+
+
+# ---------------- compliance dashboard + full stats ----------------
+
+@router.get("/dashboard")
+def compliance_dashboard(mode: str = "", db: Session = Depends(get_db)):
+    from .crm_models import EventLog, ScraperJob, ScraperResult
+    from .database import Sender
+
+    # mode-aware campaign totals
+    cq = db.query(Campaign)
+    if mode:
+        cq = cq.filter(Campaign.mode == mode)
+    campaign_ids = [c.id for c in cq.all()]
+
+    totals = {"sent": 0, "opened": 0, "replied": 0, "failed": 0, "unsubscribed": 0, "not_interested": 0}
+    eq = db.query(EventLog)
+    if mode:
+        eq = eq.filter(EventLog.campaign_id.in_(campaign_ids or [-1]))
+    for ev in eq.all():
+        if ev.type in totals:
+            totals[ev.type] += 1
+
+    contacts_q = db.query(Contact)
+    if mode:
+        contacts_q = contacts_q.filter(Contact.mode == mode)
+
+    # scraper stats (mode-aware)
+    scraper_q = db.query(ScraperJob)
+    if mode:
+        scraper_q = scraper_q.filter(ScraperJob.mode == mode)
+    scraper_jobs_all = scraper_q.all()
+    total_scraped_emails = sum(j.emails_found for j in scraper_jobs_all)
+    total_domains_scraped = sum(j.total for j in scraper_jobs_all)
+
+    # per-sender stats
+    senders = db.query(Sender).all()
+    sender_stats = []
+    for s in senders:
+        sender_sent = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "sent").count()
+        sender_failed = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "failed").count()
+        sender_replied = db.query(EventLog).filter(EventLog.sender_id == s.id, EventLog.type == "replied").count()
+        sender_stats.append({
+            "id": s.id, "email": s.email, "name": s.name or s.email.split("@")[0],
+            "method": s.method, "health": s.health, "status": s.status,
+            "sent": sender_sent, "failed": sender_failed, "replied": sender_replied,
+            "sent_today": s.sent_today, "total_sent": s.total_sent, "daily_cap": s.daily_cap,
+        })
+
+    prof = compliance.get_profile(db)
+    return {
+        "mode": mode or "all",
+        "company_profile_completed": bool(prof and prof.completed),
+        "statuses": {
+            "Sent": totals["sent"], "Opened": totals["opened"], "Replied": totals["replied"],
+            "Failed": totals["failed"], "Unsubscribed": totals["unsubscribed"],
+            "Not Interested": totals["not_interested"],
+        },
+        "contacts": contacts_q.count(),
+        "suppressed": db.query(Suppression).count(),
+        "campaigns": len(campaign_ids),
+        "approved_campaigns": cq.filter(Campaign.status.in_(["approved", "sending", "completed"])).count(),
+        "unsubscribe_rate": round(totals["unsubscribed"] / totals["sent"] * 100, 2) if totals["sent"] else 0.0,
+        "scraper": {
+            "total_jobs": len(scraper_jobs_all),
+            "total_domains": total_domains_scraped,
+            "total_emails_found": total_scraped_emails,
+        },
+        "sender_stats": sender_stats,
+    }
+
+
+@router.get("/stats/scraper-history")
+def scraper_history(mode: str = "", db: Session = Depends(get_db)):
+    """All scraper jobs with their results — for the expandable stats view."""
+    from .crm_models import ScraperJob, ScraperResult
+    q = db.query(ScraperJob)
+    if mode:
+        q = q.filter(ScraperJob.mode == mode)
+    jobs = q.order_by(ScraperJob.id.desc()).all()
+    out = []
+    for j in jobs:
+        results = db.query(ScraperResult).filter(ScraperResult.job_id == j.id).all()
+        out.append({
+            "id": j.id, "name": j.name, "mode": j.mode, "status": j.status,
+            "total": j.total, "done": j.done, "emails_found": j.emails_found,
+            "created_at": j.created_at.isoformat(),
+            "emails": [{"email": r.email, "domain": r.domain, "email_type": r.email_type,
+                        "confidence": r.confidence, "source_url": r.source_url}
+                       for r in results],
+        })
+    return out
+
+
+@router.get("/stats/sender-history")
+def sender_history(db: Session = Depends(get_db)):
+    """Per-sender detailed send log — for expandable sender stats."""
+    from .crm_models import EventLog
+    from .database import Sender
+    senders = db.query(Sender).all()
+    out = []
+    for s in senders:
+        events = (db.query(EventLog).filter(EventLog.sender_id == s.id)
+                  .order_by(EventLog.id.desc()).limit(200).all())
+        out.append({
+            "id": s.id, "email": s.email, "name": s.name or s.email.split("@")[0],
+            "method": s.method, "health": s.health, "status": s.status,
+            "total_sent": s.total_sent, "sent_today": s.sent_today, "daily_cap": s.daily_cap,
+            "events": [{"type": e.type, "campaign_id": e.campaign_id,
+                        "created_at": e.created_at.isoformat()} for e in events],
+        })
+    return out
+
+
+# ============ OUTREACH SHEET (Campaign Send List) ============
+
+@router.post("/outreach/add-from-scraper")
+def add_scraper_results_to_outreach(job_id: int, mode: str = "vendor", db: Session = Depends(get_db)):
+    """Add all emails from a scraper job to the outreach sheet. No duplicates."""
+    from .crm_models import ScraperResult, OutreachEntry
+    results = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).all()
+    added = 0
+    for r in results:
+        exists = db.query(OutreachEntry).filter(
+            OutreachEntry.mode == mode, OutreachEntry.email == r.email).first()
+        if not exists:
+            db.add(OutreachEntry(mode=mode, email=r.email, domain=r.domain,
+                email_type=r.email_type, confidence=r.confidence, source_url=r.source_url))
+            added += 1
+    db.commit()
+    return {"added": added, "total": db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()}
+
+
+@router.get("/outreach/list")
+def list_outreach(mode: str = "vendor", page: int = 1, limit: int = 100, db: Session = Depends(get_db)):
+    """Paginated outreach sheet with live status."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+    total = q.count()
+    entries = q.order_by(OutreachEntry.id.desc()).offset((page-1)*limit).limit(limit).all()
+    return {
+        "total": total, "page": page, "limit": limit,
+        "entries": [{"id":e.id,"email":e.email,"domain":e.domain,"email_type":e.email_type,
+                     "confidence":e.confidence,"source_url":e.source_url,"status":e.status,
+                     "sent_at":e.sent_at.isoformat() if e.sent_at else None,
+                     "opened_at":e.opened_at.isoformat() if e.opened_at else None,
+                     "replied_at":e.replied_at.isoformat() if e.replied_at else None,
+                     "sender_email":e.sender_email,"subject":e.subject,
+                     "created_at":e.created_at.isoformat()} for e in entries]
+    }
+
+
+@router.get("/outreach/stats")
+def outreach_stats(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Live stats for the outreach sheet."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+    total = q.count()
+    sent = q.filter(OutreachEntry.status.in_(["sent","opened","replied"])).count()
+    opened = q.filter(OutreachEntry.status.in_(["opened","replied"])).count()
+    replied = q.filter(OutreachEntry.status == "replied").count()
+    bounced = q.filter(OutreachEntry.status == "bounced").count()
+    pending = q.filter(OutreachEntry.status == "pending").count()
+    return {"total":total,"pending":pending,"sent":sent,"opened":opened,
+            "replied":replied,"bounced":bounced,
+            "open_rate":round(opened/max(1,sent)*100,1),
+            "reply_rate":round(replied/max(1,sent)*100,1)}
+
+
+@router.get("/outreach/export")
+def export_outreach(mode: str = "vendor", format: str = "csv", db: Session = Depends(get_db)):
+    """Export outreach sheet as CSV or Excel."""
+    from .crm_models import OutreachEntry
+    from fastapi.responses import Response
+    entries = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).order_by(OutreachEntry.id).all()
+    if format == "xlsx":
+        from openpyxl import Workbook
+        from io import BytesIO
+        wb = Workbook(); ws = wb.active
+        ws.append(["Email","Domain","Type","Confidence","Status","Sent","Opened","Replied","Source","Added"])
+        for e in entries:
+            ws.append([e.email,e.domain,e.email_type,e.confidence,e.status,
+                       str(e.sent_at or ""),str(e.opened_at or ""),str(e.replied_at or ""),
+                       e.source_url,str(e.created_at)])
+        buf = BytesIO(); wb.save(buf); buf.seek(0)
+        return Response(content=buf.read(),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition":"attachment; filename=outreach.xlsx"})
+    # CSV
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Email","Domain","Type","Confidence","Status","Sent","Opened","Replied","Source","Added"])
+    for e in entries:
+        w.writerow([e.email,e.domain,e.email_type,e.confidence,e.status,
+                    e.sent_at or "",e.opened_at or "",e.replied_at or "",e.source_url,e.created_at])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition":"attachment; filename=outreach.csv"})
+
+
+# ============ AUTO-CAMPAIGN BUILDER ============
+
+@router.post("/outreach/build-campaigns")
+def build_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Auto-create campaigns from pending outreach emails.
+    Each sender gets one campaign with emails up to their daily_cap."""
+    from .crm_models import OutreachEntry
+    from .database import Sender
+
+    senders = db.query(Sender).filter(Sender.mode == mode).all()
+    if not senders:
+        return {"error": "No senders in this mode. Add senders first.", "campaigns": []}
+
+    pending = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == mode, OutreachEntry.status == "pending"
+    ).order_by(OutreachEntry.id).all()
+
+    if not pending:
+        return {"error": "No pending emails in send list.", "campaigns": []}
+
+    created = []
+    idx = 0
+    for sender in senders:
+        if idx >= len(pending):
+            break
+        cap = sender.daily_cap or 150
+        batch = pending[idx:idx + cap]
+        idx += cap
+
+        # Create campaign
+        camp = Campaign(
+            mode=mode,
+            name=f"Campaign — {sender.email} ({len(batch)} emails)",
+            status="ready",
+            lawful_basis="legitimate_interest",
+            sender_ids=str(sender.id),
+        )
+        db.add(camp)
+        db.commit()
+        db.refresh(camp)
+
+        # Link emails to this campaign
+        for entry in batch:
+            entry.status = "queued"
+            entry.sender_email = sender.email
+            db.add(QueueItem(
+                campaign_id=camp.id,
+                contact_id=0,
+                sender_id=sender.id,
+                email=entry.email,
+                subject="",
+                body_html="",
+            ))
+        db.commit()
+
+        created.append({
+            "campaign_id": camp.id,
+            "sender": sender.email,
+            "emails": len(batch),
+            "status": "ready"
+        })
+
+    remaining = len(pending) - idx
+    return {"campaigns": created, "remaining_pending": remaining,
+            "total_queued": idx}
+
+
+@router.get("/outreach/campaigns")
+def list_outreach_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
+    """List all campaigns with stats."""
+    from .crm_models import OutreachEntry
+    camps = db.query(Campaign).filter(Campaign.mode == mode).order_by(Campaign.id.desc()).all()
+    out = []
+    for c in camps:
+        # Count statuses from outreach entries linked to this campaign's sender
+        total_queued = db.query(QueueItem).filter(QueueItem.campaign_id == c.id).count()
+        sent = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "sent").count()
+        opened = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "opened").count()
+        replied = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "replied").count()
+        failed = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "failed").count()
+        out.append({
+            "id": c.id, "name": c.name, "status": c.status, "mode": c.mode,
+            "total": total_queued, "sent": sent, "opened": opened,
+            "replied": replied, "failed": failed,
+            "created_at": c.created_at.isoformat() if c.created_at else ""
+        })
+    return out
