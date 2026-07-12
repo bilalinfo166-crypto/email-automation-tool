@@ -93,7 +93,7 @@ def update_sender(sender_id: int, data: dict, db: Session = Depends(get_db)):
     if "name" in data:
         s.name = data["name"]
     if "daily_cap" in data:
-        s.daily_cap = max(20, min(200, int(data["daily_cap"])))
+        s.daily_cap = max(1, min(1000, int(data["daily_cap"])))
     if "warmup" in data:
         s.warmup = bool(data["warmup"])
     db.commit()
