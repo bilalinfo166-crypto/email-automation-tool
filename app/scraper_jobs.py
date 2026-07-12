@@ -4,6 +4,15 @@ Wraps the compliant `scraper.extract_domain` (company's own public business page
 same-domain published addresses only) as the core engine, and runs batches as
 background jobs with live per-domain status, stop/resume/restart, dedup, email
 validation, and CSV/XLSX export. Jobs are scoped by mode (vendor/client).
+
+Dynamic Concurrency Scaling:
+  1–100 domains → 20 workers
+  101–500 → 35
+  501–1000 → 50
+  1001–5000 → 75
+  5001–20000 → 100
+  20001+ → 125 (capped by resources)
+  Auto-decreases if CPU > 85% or RAM > 85%
 """
 import csv
 import io
@@ -17,6 +26,50 @@ from .crm_models import ScraperJob, ScraperJobDomain, ScraperResult
 from . import scraper, compliance
 
 _threads: dict[int, threading.Thread] = {}
+
+
+def _calc_workers(total_domains: int) -> int:
+    """Dynamic worker count based on domain count."""
+    if total_domains <= 100:
+        return 20
+    elif total_domains <= 500:
+        return 35
+    elif total_domains <= 1000:
+        return 50
+    elif total_domains <= 5000:
+        return 75
+    elif total_domains <= 20000:
+        return 100
+    else:
+        return 125
+
+
+def _check_resources() -> float:
+    """Return a scaling factor (0.0–1.0) based on CPU/RAM usage.
+    1.0 = resources fine, <1.0 = reduce workers proportionally."""
+    try:
+        import psutil
+        cpu = psutil.cpu_percent(interval=0.1)
+        ram = psutil.virtual_memory().percent
+        if cpu > 90 or ram > 90:
+            return 0.5  # halve workers
+        if cpu > 85 or ram > 85:
+            return 0.7  # reduce 30%
+        if cpu > 75 or ram > 80:
+            return 0.85
+        return 1.0
+    except ImportError:
+        return 1.0  # psutil not installed — no throttling
+    except Exception:
+        return 1.0
+
+
+def _effective_workers(total_domains: int) -> int:
+    """Calculate workers with resource-aware scaling."""
+    base = _calc_workers(total_domains)
+    factor = _check_resources()
+    effective = max(5, int(base * factor))  # minimum 5 workers always
+    return effective
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 JUNK_ENDINGS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
@@ -70,8 +123,6 @@ def create_job(db, mode: str, name: str, domains: list[str], source: str = "manu
 
 # ---------------- the worker ----------------
 
-WORKERS = 30   # 30 domains simultaneously = results in seconds
-
 
 def _scrape_one(domain: str, mode: str = "vendor") -> dict:
     """Network only — safe to run in a thread (no DB access here)."""
@@ -115,6 +166,15 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
                              email_type=c.get("email_type", "domain_email"),
                              confidence=c.get("confidence", "medium")))
         kept += 1
+        # AUTO-ADD to outreach send list (no duplicates)
+        from .crm_models import OutreachEntry
+        exists = db.query(OutreachEntry).filter(
+            OutreachEntry.mode == job.mode, OutreachEntry.email == email).first()
+        if not exists:
+            db.add(OutreachEntry(mode=job.mode, email=email, domain=jd.domain,
+                email_type=c.get("email_type", "domain_email"),
+                confidence=c.get("confidence", "medium"),
+                source_url=c.get("source_url", "")))
     jd.status = "completed" if kept else "no_email"
     jd.source_url = valid[0].get("source_url", "") if valid else ""
     db.commit()
@@ -165,7 +225,12 @@ def _run(job_id: int):
         if not pending_ids:
             job.status = "completed"; db.commit(); return
 
-        pool = ThreadPoolExecutor(max_workers=WORKERS)
+        # Dynamic concurrency based on total domains + server resources
+        total = len(pending_ids)
+        workers = _effective_workers(total)
+        print(f"[WarmWire] Job #{job_id}: {total} domains → {workers} workers")
+
+        pool = ThreadPoolExecutor(max_workers=workers)
         futures = {}
 
         def _submit_next():
@@ -181,7 +246,7 @@ def _run(job_id: int):
             return False
 
         # Fill pool
-        for _ in range(min(WORKERS, len(pending_ids))):
+        for _ in range(min(workers, len(pending_ids))):
             _submit_next()
 
         while futures:

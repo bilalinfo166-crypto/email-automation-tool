@@ -469,3 +469,92 @@ def export_outreach(mode: str = "vendor", format: str = "csv", db: Session = Dep
                     e.sent_at or "",e.opened_at or "",e.replied_at or "",e.source_url,e.created_at])
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition":"attachment; filename=outreach.csv"})
+
+
+# ============ AUTO-CAMPAIGN BUILDER ============
+
+@router.post("/outreach/build-campaigns")
+def build_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Auto-create campaigns from pending outreach emails.
+    Each sender gets one campaign with emails up to their daily_cap."""
+    from .crm_models import OutreachEntry
+    from .database import Sender
+
+    senders = db.query(Sender).filter(Sender.mode == mode).all()
+    if not senders:
+        return {"error": "No senders in this mode. Add senders first.", "campaigns": []}
+
+    pending = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == mode, OutreachEntry.status == "pending"
+    ).order_by(OutreachEntry.id).all()
+
+    if not pending:
+        return {"error": "No pending emails in send list.", "campaigns": []}
+
+    created = []
+    idx = 0
+    for sender in senders:
+        if idx >= len(pending):
+            break
+        cap = sender.daily_cap or 150
+        batch = pending[idx:idx + cap]
+        idx += cap
+
+        # Create campaign
+        camp = Campaign(
+            mode=mode,
+            name=f"Campaign — {sender.email} ({len(batch)} emails)",
+            status="ready",
+            lawful_basis="legitimate_interest",
+            sender_ids=str(sender.id),
+        )
+        db.add(camp)
+        db.commit()
+        db.refresh(camp)
+
+        # Link emails to this campaign
+        for entry in batch:
+            entry.status = "queued"
+            entry.sender_email = sender.email
+            db.add(QueueItem(
+                campaign_id=camp.id,
+                contact_id=0,
+                sender_id=sender.id,
+                email=entry.email,
+                subject="",
+                body_html="",
+            ))
+        db.commit()
+
+        created.append({
+            "campaign_id": camp.id,
+            "sender": sender.email,
+            "emails": len(batch),
+            "status": "ready"
+        })
+
+    remaining = len(pending) - idx
+    return {"campaigns": created, "remaining_pending": remaining,
+            "total_queued": idx}
+
+
+@router.get("/outreach/campaigns")
+def list_outreach_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
+    """List all campaigns with stats."""
+    from .crm_models import OutreachEntry
+    camps = db.query(Campaign).filter(Campaign.mode == mode).order_by(Campaign.id.desc()).all()
+    out = []
+    for c in camps:
+        # Count statuses from outreach entries linked to this campaign's sender
+        total_queued = db.query(QueueItem).filter(QueueItem.campaign_id == c.id).count()
+        sent = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "sent").count()
+        opened = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "opened").count()
+        replied = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "replied").count()
+        failed = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "failed").count()
+        out.append({
+            "id": c.id, "name": c.name, "status": c.status, "mode": c.mode,
+            "total": total_queued, "sent": sent, "opened": opened,
+            "replied": replied, "failed": failed,
+            "created_at": c.created_at.isoformat() if c.created_at else ""
+        })
+    return out

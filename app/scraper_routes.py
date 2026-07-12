@@ -74,6 +74,7 @@ def job_status(job_id: int, mode: str = "", db: Session = Depends(get_db)):
         "id": job.id, "name": job.name, "mode": job.mode, "status": job.status,
         "total": job.total, "done": job.done, "emails_found": job.emails_found,
         "progress": round(job.done / job.total * 100, 1) if job.total else 0,
+        "workers": scraper_jobs._effective_workers(job.total) if job.total else 20,
         "domains": [{"domain": d.domain, "status": d.status, "error": d.error,
                      "source_url": d.source_url, "is_duplicate": d.is_duplicate,
                      "vendor_signals": d.vendor_signals,
