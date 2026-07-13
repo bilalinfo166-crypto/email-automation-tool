@@ -388,10 +388,15 @@ def sender_history(db: Session = Depends(get_db)):
 # ============ OUTREACH SHEET (Campaign Send List) ============
 
 @router.post("/outreach/add-from-scraper")
-def add_scraper_results_to_outreach(job_id: int, mode: str = "vendor", db: Session = Depends(get_db)):
-    """Add all emails from a scraper job to the outreach sheet. No duplicates."""
-    from .crm_models import ScraperResult, OutreachEntry
-    results = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).all()
+def add_scraper_results_to_outreach(mode: str = "vendor", job_id: int = 0, db: Session = Depends(get_db)):
+    """Add scraped emails to outreach send list. If job_id=0, add from ALL jobs."""
+    from .crm_models import ScraperResult, ScraperJob, OutreachEntry
+    if job_id > 0:
+        results = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).all()
+    else:
+        # Add from ALL jobs in this mode
+        job_ids = [j.id for j in db.query(ScraperJob).filter(ScraperJob.mode == mode).all()]
+        results = db.query(ScraperResult).filter(ScraperResult.job_id.in_(job_ids or [-1])).all()
     added = 0
     for r in results:
         exists = db.query(OutreachEntry).filter(
@@ -401,7 +406,8 @@ def add_scraper_results_to_outreach(job_id: int, mode: str = "vendor", db: Sessi
                 email_type=r.email_type, confidence=r.confidence, source_url=r.source_url))
             added += 1
     db.commit()
-    return {"added": added, "total": db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()}
+    total = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()
+    return {"added": added, "total": total}
 
 
 @router.get("/outreach/list")
@@ -558,3 +564,27 @@ def list_outreach_campaigns(mode: str = "vendor", db: Session = Depends(get_db))
             "created_at": c.created_at.isoformat() if c.created_at else ""
         })
     return out
+
+
+# ============ SEND ENGINE ============
+
+@router.post("/send/start")
+def start_sending(campaign_id: int, mode: str = "vendor", 
+                  emails_per_batch: int = 10, delay_seconds: int = 60,
+                  scheduled_time: str = None, db: Session = Depends(get_db)):
+    """Start sending emails for a campaign with rate control and optional scheduling."""
+    from . import send_engine
+    result = send_engine.start_campaign_send(
+        campaign_id=campaign_id, mode=mode,
+        emails_per_batch=emails_per_batch,
+        delay_seconds=delay_seconds,
+        scheduled_time=scheduled_time
+    )
+    return result
+
+
+@router.post("/send/stop")
+def stop_sending(campaign_id: int, db: Session = Depends(get_db)):
+    """Stop a running campaign."""
+    from . import send_engine
+    return send_engine.stop_campaign(campaign_id)
