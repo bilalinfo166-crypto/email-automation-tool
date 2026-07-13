@@ -588,3 +588,12 @@ def stop_sending(campaign_id: int, db: Session = Depends(get_db)):
     """Stop a running campaign."""
     from . import send_engine
     return send_engine.stop_campaign(campaign_id)
+
+
+# ============ TEMPLATES ============
+
+@router.get("/templates")
+def list_templates():
+    """Return all 50 outreach templates."""
+    from .email_templates import TEMPLATES
+    return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(TEMPLATES)]
