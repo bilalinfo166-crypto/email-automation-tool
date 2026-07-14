@@ -64,9 +64,12 @@ class QueueItem(Base):
     __tablename__ = "queue_items"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
-    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), index=True)
-    sender_id: Mapped[int] = mapped_column(Integer, default=0)     # round-robin assigned
-    status: Mapped[str] = mapped_column(String, default="queued")  # queued/sent/failed/skipped
+    contact_id: Mapped[int] = mapped_column(Integer, default=0)
+    sender_id: Mapped[int] = mapped_column(Integer, default=0)
+    email: Mapped[str] = mapped_column(String, default="")
+    subject: Mapped[str] = mapped_column(String, default="")
+    body_html: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="queued")
     unsub_token: Mapped[str] = mapped_column(String, default="", index=True)
     error: Mapped[str] = mapped_column(String, default="")
     sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)

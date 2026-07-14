@@ -511,8 +511,6 @@ def build_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
             mode=mode,
             name=f"Campaign — {sender.email} ({len(batch)} emails)",
             status="ready",
-            lawful_basis="legitimate_interest",
-            sender_ids=str(sender.id),
         )
         db.add(camp)
         db.commit()

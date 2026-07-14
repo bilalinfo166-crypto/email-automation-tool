@@ -122,11 +122,11 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                     if sender.method == "app_password" and app_pw:
                         send_via_smtp(
                             sender_email=sender.email,
+                            sender_name=sender.name or "",
                             app_password=app_pw,
-                            to_email=entry.email,
+                            to=entry.email,
                             subject=rendered["subject"],
                             body_html=rendered["body_html"],
-                            sender_name=sender.name or ""
                         )
                         # Update status
                         entry.status = "sent"
