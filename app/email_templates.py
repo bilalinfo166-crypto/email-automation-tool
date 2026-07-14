@@ -4,16 +4,18 @@ Each template is personalized with {{variables}}.
 """
 
 COMPANY_FOOTER = """
-<div style="margin-top:30px;padding-top:15px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;font-family:Arial,sans-serif">
+<div style="margin-top:30px;font-family:Arial,sans-serif">
+<div style="background:#1a1a2e;color:#ffffff;text-align:center;padding:12px 20px;border-radius:8px;margin-bottom:15px">
+<a href="{{unsubscribe_url}}" style="color:#ffffff;text-decoration:underline;font-size:13px;font-weight:600">Unsubscribe from future emails</a>
+</div>
+<div style="padding-top:12px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280">
 <table cellpadding="0" cellspacing="0" border="0"><tr>
 <td style="padding-right:15px"><img src="https://uplyncio.com/logo.png" width="40" height="40" alt="Uplyncio" style="border-radius:8px"></td>
 <td><b style="color:#1a1a2e">Uplyncio.com</b><br>Guest Posting & Niche Edit Platform<br>
 <a href="mailto:info@uplyncio.com" style="color:#4f46e5;text-decoration:none">info@uplyncio.com</a></td>
 </tr></table>
-<p style="margin-top:12px;font-size:11px;color:#9ca3af">
-<a href="{{unsubscribe_url}}" style="color:#9ca3af;text-decoration:underline">Unsubscribe</a> · 
-You received this because your contact info is publicly listed on your website.
-</p></div>"""
+<p style="margin-top:8px;font-size:10px;color:#9ca3af">You received this because your contact info is publicly listed on your website.</p>
+</div></div>"""
 
 TEMPLATES = [
     # 1-10: Soft introduction

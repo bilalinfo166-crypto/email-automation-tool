@@ -14,6 +14,8 @@ def _build_message(sender_email: str, sender_name: str, to: str, subject: str, b
     msg["From"] = from_header
     msg["To"] = to
     msg["Subject"] = subject
+    msg["X-Mailer"] = "WarmWire/1.0"
+    msg["X-WarmWire"] = "sent-via-warmwire"
     msg.attach(MIMEText(body_html, "html"))
     return msg
 

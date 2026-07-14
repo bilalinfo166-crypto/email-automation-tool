@@ -26,11 +26,23 @@ def _get_senders(db, mode):
 
 
 def _build_variables(entry, sender):
-    """Build template variables from outreach entry + sender."""
+    """Build template variables from outreach entry + sender. Site-personalized."""
     email = entry.email
     domain = entry.domain or email.split("@")[-1]
-    first_name = email.split("@")[0].split(".")[0].title()
-    company = domain.split(".")[0].title()
+    local = email.split("@")[0]
+
+    # Smart first name extraction
+    if "." in local:
+        first_name = local.split(".")[0].title()
+    elif local in ("info","contact","sales","hello","support","office","admin","help","team","press","media","marketing","editor","hr"):
+        first_name = "there"
+    else:
+        first_name = local.title()
+
+    # Company name from domain
+    company = domain.replace("www.","").split(".")[0]
+    # Clean company name
+    company = company.replace("-"," ").replace("_"," ").title()
 
     return {
         "first_name": first_name,
