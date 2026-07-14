@@ -595,3 +595,37 @@ def list_templates():
     """Return all 50 outreach templates."""
     from .email_templates import TEMPLATES
     return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(TEMPLATES)]
+
+
+@router.post("/outreach/import-csv")
+def import_csv_to_outreach(mode: str = "client", db: Session = Depends(get_db)):
+    """Import emails from scraper_6__3_.csv in the working directory."""
+    import csv, os
+    from .crm_models import OutreachEntry
+    # Try multiple possible locations
+    paths = ["scraper_6__3_.csv", "app/scraper_6__3_.csv", "../scraper_6__3_.csv",
+             os.path.expanduser("~/Desktop/files/scraper_6__3_.csv"),
+             "C:/Users/Dell/Desktop/files/scraper_6__3_.csv",
+             "C:/Users/Dell/Downloads/scraper_6__3_.csv"]
+    csv_path = None
+    for p in paths:
+        if os.path.exists(p):
+            csv_path = p; break
+    if not csv_path:
+        return {"error": "CSV file not found. Place scraper_6__3_.csv in C:\\Users\\Dell\\Desktop\\files\\", "paths_checked": paths}
+    added = 0
+    with open(csv_path, 'r', encoding='utf-8-sig') as f:
+        for row in csv.DictReader(f):
+            email = (row.get('Email') or '').strip()
+            domain = (row.get('Domain') or '').strip()
+            if not email or '@' not in email: continue
+            exists = db.query(OutreachEntry).filter(OutreachEntry.email == email, OutreachEntry.mode == mode).first()
+            if not exists:
+                db.add(OutreachEntry(mode=mode, email=email, domain=domain,
+                    email_type=row.get('Email Type','domain_email'),
+                    confidence=row.get('Confidence','medium'),
+                    source_url=row.get('Source URL',''), status='pending'))
+                added += 1
+    db.commit()
+    total = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()
+    return {"added": added, "total": total, "file": csv_path}
