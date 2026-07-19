@@ -675,3 +675,44 @@ def sender_activity(mode: str = "vendor", page: int = 1, limit: int = 100,
                      "replied_at": e.replied_at.isoformat() if e.replied_at else None
                      } for e in entries]
     }
+
+
+# ============ WARMUP ENGINE ============
+
+@router.post("/warmup/start")
+def start_warmup_engine(mode: str = "client", interval_minutes: int = 90):
+    """Start real-time warmup — senders email each other, rescue from spam, reply."""
+    from . import warmup_engine
+    return warmup_engine.start_warmup(mode, interval_minutes)
+
+
+@router.post("/warmup/stop")
+def stop_warmup_engine():
+    from . import warmup_engine
+    return warmup_engine.stop_warmup()
+
+
+@router.post("/warmup/run-once")
+def run_warmup_once(mode: str = "client"):
+    """Run one warmup cycle immediately (for testing)."""
+    from . import warmup_engine
+    return warmup_engine.run_warmup_cycle(mode)
+
+
+@router.get("/warmup/engine-status")
+def get_warmup_engine_status(mode: str = "client", db: Session = Depends(get_db)):
+    from . import warmup_engine
+    from .database import Sender
+    status = warmup_engine.warmup_status()
+    pool = warmup_engine.pool_info(db)
+    senders = db.query(Sender).filter(Sender.mode == mode, Sender.warmup == True).all()
+    return {
+        "running": status["running"],
+        "active_senders": len(senders),
+        "pool_size": pool["pool_size"],
+        "pool_domains": pool["domains"],
+        "can_warmup": pool["can_warmup"],
+        "domain_breakdown": pool["domain_breakdown"],
+        "senders": [{"email": s.email, "warmup_sent_today": s.warmup_sent_today or 0,
+                     "total_sent": s.total_sent or 0} for s in senders]
+    }
