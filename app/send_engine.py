@@ -116,6 +116,18 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 variables = _build_variables(entry, sender)
                 rendered = render_template(template, variables)
 
+                # VERIFY email before sending (MX check) — reduces bounces
+                try:
+                    from .email_verify import quick_verify
+                    is_valid, reason = quick_verify(entry.email)
+                    if not is_valid:
+                        entry.status = "bounced"
+                        db.commit()
+                        print(f"[SendEngine] Skipped invalid: {entry.email} ({reason})")
+                        continue
+                except Exception:
+                    pass  # if verification fails, proceed with send
+
                 # Send email
                 try:
                     app_pw = security.decrypt(sender.app_password) if sender.app_password else ""

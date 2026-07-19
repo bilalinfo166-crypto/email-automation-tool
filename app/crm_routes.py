@@ -631,3 +631,47 @@ def import_csv_to_outreach(mode: str = "client", db: Session = Depends(get_db)):
     db.commit()
     total = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()
     return {"added": added, "total": total, "file": csv_path}
+
+
+@router.post("/outreach/verify")
+def verify_outreach_emails(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Verify all pending emails (MX check). Marks invalid ones as bounced."""
+    from .crm_models import OutreachEntry
+    from .email_verify import quick_verify
+    pending = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == mode, OutreachEntry.status == "pending").all()
+    valid = 0; invalid = 0
+    for entry in pending:
+        is_valid, reason = quick_verify(entry.email)
+        if not is_valid:
+            entry.status = "bounced"
+            invalid += 1
+        else:
+            valid += 1
+    db.commit()
+    return {"checked": len(pending), "valid": valid, "invalid": invalid}
+
+
+@router.get("/senders/activity")
+def sender_activity(mode: str = "vendor", page: int = 1, limit: int = 100,
+                    sender: str = "", db: Session = Depends(get_db)):
+    """Live sending history — which email sent via which sender, status, dates."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == mode,
+        OutreachEntry.status.in_(["sent", "opened", "replied", "bounced"])
+    )
+    if sender:
+        q = q.filter(OutreachEntry.sender_email == sender)
+    total = q.count()
+    entries = q.order_by(OutreachEntry.sent_at.desc()).offset((page-1)*limit).limit(limit).all()
+    return {
+        "total": total, "page": page,
+        "entries": [{"email": e.email, "domain": e.domain,
+                     "sender_email": e.sender_email or "—",
+                     "status": e.status, "subject": e.subject,
+                     "sent_at": e.sent_at.isoformat() if e.sent_at else None,
+                     "opened_at": e.opened_at.isoformat() if e.opened_at else None,
+                     "replied_at": e.replied_at.isoformat() if e.replied_at else None
+                     } for e in entries]
+    }
