@@ -411,10 +411,12 @@ def add_scraper_results_to_outreach(mode: str = "vendor", job_id: int = 0, db: S
 
 
 @router.get("/outreach/list")
-def list_outreach(mode: str = "vendor", page: int = 1, limit: int = 100, db: Session = Depends(get_db)):
-    """Paginated outreach sheet with live status."""
+def list_outreach(mode: str = "vendor", page: int = 1, limit: int = 100, status: str = "", db: Session = Depends(get_db)):
+    """Paginated outreach sheet with live status and optional filter."""
     from .crm_models import OutreachEntry
     q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+    if status:
+        q = q.filter(OutreachEntry.status == status)
     total = q.count()
     entries = q.order_by(OutreachEntry.id.desc()).offset((page-1)*limit).limit(limit).all()
     return {
