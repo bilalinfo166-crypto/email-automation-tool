@@ -57,6 +57,14 @@ class Campaign(Base):
     per_sender_daily_cap: Mapped[int] = mapped_column(Integer, default=100)
     min_delay_sec: Mapped[int] = mapped_column(Integer, default=25)
     max_delay_sec: Mapped[int] = mapped_column(Integer, default=60)
+    # --- autopilot & scheduling ---
+    emails_per_batch: Mapped[int] = mapped_column(Integer, default=10)
+    delay_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    scheduled_time: Mapped[str] = mapped_column(String, default="")   # ISO datetime or empty
+    sender_emails: Mapped[str] = mapped_column(Text, default="")      # comma-separated selected senders
+    autopilot: Mapped[bool] = mapped_column(Boolean, default=False)   # keep sending daily until list done
+    total_target: Mapped[int] = mapped_column(Integer, default=0)     # how many emails this campaign should send
+    sent_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

@@ -56,8 +56,10 @@ def _build_variables(entry, sender):
 
 
 def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
-                        delay_seconds: int = 60, scheduled_time: str = None):
-    """Start sending emails for a campaign. Optionally schedule for later."""
+                        delay_seconds: int = 60, scheduled_time: str = None,
+                        sender_filter: str = None, total_target: int = 0,
+                        autopilot: bool = False):
+    """Start sending. sender_filter = comma-separated emails (only use these senders)."""
     if campaign_id in _send_threads:
         return {"error": "Campaign already sending"}
 
@@ -82,16 +84,24 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             db.commit()
 
             senders = _get_senders(db, mode)
+            # Filter to only selected senders if specified
+            if sender_filter:
+                allowed = [e.strip() for e in sender_filter.split(",") if e.strip()]
+                senders = [s for s in senders if s.email in allowed]
             if not senders:
                 campaign.status = "error: no senders"
                 db.commit()
                 return
 
-            # Get all pending entries for this campaign
-            pending = db.query(OutreachEntry).filter(
+            # Get pending entries — limit to target if set
+            q = db.query(OutreachEntry).filter(
                 OutreachEntry.mode == mode,
                 OutreachEntry.status.in_(["pending", "queued"])
-            ).order_by(OutreachEntry.id).all()
+            ).order_by(OutreachEntry.id)
+            if total_target > 0:
+                pending = q.limit(total_target).all()
+            else:
+                pending = q.all()
 
             sent_count = 0
             template_idx = 0

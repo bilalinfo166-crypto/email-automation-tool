@@ -716,3 +716,90 @@ def get_warmup_engine_status(mode: str = "client", db: Session = Depends(get_db)
         "senders": [{"email": s.email, "warmup_sent_today": s.warmup_sent_today or 0,
                      "total_sent": s.total_sent or 0} for s in senders]
     }
+
+
+# ============ FULL CAMPAIGN SYSTEM (autopilot, scheduling, sender selection) ============
+
+@router.post("/campaign/create")
+def create_campaign(
+    name: str, mode: str = "vendor",
+    sender_emails: str = "",       # comma-separated: "a@x.com,b@y.com"
+    emails_per_batch: int = 10,
+    delay_seconds: int = 60,
+    total_target: int = 0,          # 0 = all pending
+    scheduled_time: str = "",       # ISO datetime, empty = manual
+    autopilot: bool = False,
+    db: Session = Depends(get_db)
+):
+    """Create a campaign with full control: which senders, timing, autopilot."""
+    from .crm_models import OutreachEntry
+    pending = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == mode, OutreachEntry.status == "pending").count()
+    if pending == 0:
+        return {"error": "No pending emails in send list."}
+    target = total_target if total_target > 0 else pending
+
+    camp = Campaign(
+        name=name, mode=mode, status="scheduled" if scheduled_time else "ready",
+        sender_emails=sender_emails, emails_per_batch=emails_per_batch,
+        delay_seconds=delay_seconds, scheduled_time=scheduled_time,
+        autopilot=autopilot, total_target=target,
+    )
+    db.add(camp); db.commit(); db.refresh(camp)
+    return {"campaign_id": camp.id, "name": camp.name, "target": target,
+            "status": camp.status, "autopilot": autopilot}
+
+
+@router.get("/campaign/list")
+def list_all_campaigns(mode: str = "vendor", db: Session = Depends(get_db)):
+    """List all campaigns with full details."""
+    camps = db.query(Campaign).filter(Campaign.mode == mode).order_by(Campaign.id.desc()).all()
+    from .crm_models import EventLog, QueueItem
+    out = []
+    for c in camps:
+        sent = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "sent").count()
+        opened = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "opened").count()
+        replied = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "replied").count()
+        failed = db.query(EventLog).filter(EventLog.campaign_id == c.id, EventLog.type == "failed").count()
+        out.append({
+            "id": c.id, "name": c.name, "status": c.status,
+            "senders": c.sender_emails or "all", "target": c.total_target,
+            "sent": sent, "opened": opened, "replied": replied, "failed": failed,
+            "batch": c.emails_per_batch, "delay": c.delay_seconds,
+            "scheduled_time": c.scheduled_time, "autopilot": c.autopilot,
+            "created_at": c.created_at.isoformat() if c.created_at else ""
+        })
+    return out
+
+
+@router.post("/campaign/{campaign_id}/start")
+def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Start (or schedule) a specific campaign."""
+    from . import send_engine
+    camp = db.get(Campaign, campaign_id)
+    if not camp:
+        return {"error": "Campaign not found"}
+    result = send_engine.start_campaign_send(
+        campaign_id=campaign_id, mode=camp.mode,
+        emails_per_batch=camp.emails_per_batch,
+        delay_seconds=camp.delay_seconds,
+        scheduled_time=camp.scheduled_time or None,
+        sender_filter=camp.sender_emails or None,
+        total_target=camp.total_target,
+        autopilot=camp.autopilot,
+    )
+    return result
+
+
+@router.post("/campaign/{campaign_id}/stop")
+def stop_campaign_ep(campaign_id: int, db: Session = Depends(get_db)):
+    from . import send_engine
+    return send_engine.stop_campaign(campaign_id)
+
+
+@router.delete("/campaign/{campaign_id}")
+def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    camp = db.get(Campaign, campaign_id)
+    if camp:
+        db.delete(camp); db.commit()
+    return {"deleted": campaign_id}
