@@ -26,30 +26,29 @@ def _get_senders(db, mode):
 
 
 def _build_variables(entry, sender):
-    """Build template variables from outreach entry + sender. Site-personalized."""
+    """Build template variables. Body uses clean name (Today), subject uses full domain (Today.com)."""
     email = entry.email
-    domain = entry.domain or email.split("@")[-1]
-    local = email.split("@")[0]
+    domain = (entry.domain or email.split("@")[-1]).replace("www.", "").lower()
 
-    # Smart first name extraction
-    if "." in local:
-        first_name = local.split(".")[0].title()
-    elif local in ("info","contact","sales","hello","support","office","admin","help","team","press","media","marketing","editor","hr"):
-        first_name = "there"
-    else:
-        first_name = local.title()
+    # Full domain for subject line: "Today.com"
+    site_full = domain
+    # Split into name + tld, capitalize name part: today.com -> Today.com
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        name_part = parts[0].replace("-", " ").replace("_", " ")
+        # Title-case the name, keep tld lowercase
+        site_full = name_part.title().replace(" ", "") + "." + ".".join(parts[1:])
 
-    # Company name from domain
-    company = domain.replace("www.","").split(".")[0]
-    # Clean company name
-    company = company.replace("-"," ").replace("_"," ").title()
+    # Clean company name for body: "Today" (no .com, no weird chars)
+    raw = parts[0].replace("-", " ").replace("_", " ")
+    company = raw.title()
 
     return {
-        "first_name": first_name,
+        # company_name in body = clean name only ("Today")
         "company_name": company,
-        "website": domain,
-        "industry": "your industry",
-        "sender_name": sender.name or sender.email.split("@")[0].title(),
+        # website/site in subject = full domain ("Today.com")
+        "website": site_full,
+        "sender_name": (sender.name or sender.email.split("@")[0]).split()[0].title(),
         "your_company": "Uplyncio",
         "your_website": "uplyncio.com",
         "unsubscribe_url": f"http://127.0.0.1:8000/unsubscribe?email={email}",
