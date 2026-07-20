@@ -109,19 +109,8 @@ def add_app_password_sender(data: schemas.AppPasswordSenderIn, db: Session = Dep
     if db.query(Sender).filter(Sender.email == data.email).first():
         raise HTTPException(400, "That email is already connected.")
 
-    # Strict check: actually log in to Gmail SMTP before saving.
-    import smtplib
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(data.email, data.app_password)
-    except smtplib.SMTPAuthenticationError:
-        raise HTTPException(400, "Google rejected that email + app password. "
-                                 "Check 2-Step Verification is on and the code is correct.")
-    except Exception as e:
-        raise HTTPException(400, f"Could not reach Gmail SMTP: {e}")
-
+    # Save INSTANTLY — no blocking SMTP check. Verification happens in the
+    # background so the Add button responds immediately.
     s = Sender(
         email=data.email,
         name=data.name or data.email.split("@")[0].title(),
@@ -130,12 +119,44 @@ def add_app_password_sender(data: schemas.AppPasswordSenderIn, db: Session = Dep
         app_password=security.encrypt(data.app_password),
         daily_cap=20 if data.warmup else data.daily_cap,
         warmup=data.warmup,
-        status="warming" if data.warmup else "warmed",
+        status="verifying",
         health=32 if data.warmup else 70,
     )
     db.add(s)
     db.commit()
     db.refresh(s)
+
+    # Verify Gmail login in the background (non-blocking)
+    import threading
+    sender_id = s.id
+    plain_pw = data.app_password
+    email_addr = data.email
+    is_warmup = data.warmup
+
+    def _verify_bg():
+        import smtplib
+        from .database import SessionLocal
+        ok = False
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+                server.ehlo(); server.starttls()
+                server.login(email_addr, plain_pw)
+            ok = True
+        except Exception as e:
+            print(f"[Sender] Verify failed for {email_addr}: {e}")
+        bg = SessionLocal()
+        try:
+            snd = bg.get(Sender, sender_id)
+            if snd:
+                if ok:
+                    snd.status = "warming" if is_warmup else "warmed"
+                else:
+                    snd.status = "auth_failed"
+                bg.commit()
+        finally:
+            bg.close()
+
+    threading.Thread(target=_verify_bg, daemon=True).start()
     return s
 
 

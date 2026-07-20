@@ -42,8 +42,7 @@ FREE = {"gmail.com","yahoo.com","yahoo.co.uk","outlook.com","hotmail.com",
 
 JUNK_RE = [re.compile(p, re.I) for p in [
     r"^(noreply|no-reply|donotreply|mailer-daemon|postmaster|abuse|root|webmaster)@",
-    r"^(user|test|demo|sample|placeholder|yourname|youremail|name|email|someone)@",
-    r"^(your|you|me|my)@",
+    r"^(yourname|youremail)@",
     r"@example\.(com|org|net)$", r"@test\.", r"@localhost",
     r"@.*sentry", r"@.*wixpress", r"@.*wix\.com$",
     r"@.*wordpress\.(com|org)$", r"@.*squarespace\.com$", r"@.*shopify\.com$",
@@ -51,7 +50,7 @@ JUNK_RE = [re.compile(p, re.I) for p in [
     r"@.*hubspot", r"@.*herokuapp", r"@.*netlify", r"@.*vercel",
     r"@.*amazonaws", r"@.*googleusercontent", r"@.*gravatar",
     r"@.*typeform", r"@.*zendesk", r"@.*intercom", r"@.*gstatic",
-    r"^[a-z]@", r"@.*\.(png|jpg|gif|svg|css|js)$", r"[0-9a-f]{20,}@",
+    r"@.*\.(png|jpg|gif|svg|css|js)$", r"[0-9a-f]{20,}@",
 ]]
 
 BLOCKED = {"facebook.com","fb.com","linkedin.com","instagram.com","twitter.com",
@@ -172,11 +171,12 @@ def _extract(html_text):
         found|=set(EMAIL_RE.findall(_deob(m)))
 
     # Validate + clean — fast, accurate filtering
-    PLACEHOLDER_LOCALS = {"exemple","example","test","demo","sample","placeholder","yourname",
-                          "youremail","email","name","user","your","you","me","my",
-                          "someone","anybody","person","company","domain","website","site",
-                          "jane","john","johndoe","janedoe","firstname","lastname","username",
-                          "abc","xyz","foo","bar","baz","dummy","fake","null","undefined"}
+    # Only DEFINITE placeholders. Removed ambiguous ones (name/user/me/your/email/you/my/
+    # site/company/person/someone) because real businesses use these as real inboxes
+    # (email@site.com, me@brand.com, name@corp.com). Placeholder detection relies on
+    # domain (example.com etc.) + JUNK_RE instead, so real emails are never wrongly skipped.
+    PLACEHOLDER_LOCALS = {"exemple","yourname","youremail","johndoe","janedoe",
+                          "firstname","lastname","dummy","placeholder","undefined"}
     clean=set()
     for e in found:
         e=e.lower().strip(".")
