@@ -71,65 +71,93 @@ def _fetch(url, timeout=10):
     return None
 
 
+def _parse_sitemap_entries(xml):
+    """Return [(url, lastmod)] from a sitemap, so we can sort recent-first."""
+    entries = []
+    # Match <url>...<loc>X</loc>...<lastmod>Y</lastmod>...</url> blocks
+    for block in re.findall(r"<url>(.*?)</url>", xml, re.S):
+        loc_m = re.search(r"<loc>\s*(.*?)\s*</loc>", block)
+        mod_m = re.search(r"<lastmod>\s*(.*?)\s*</lastmod>", block)
+        if loc_m:
+            entries.append((loc_m.group(1).strip(), mod_m.group(1).strip() if mod_m else ""))
+    # Fallback: plain <loc> list with no <url> wrapper
+    if not entries:
+        for loc in re.findall(r"<loc>\s*(.*?)\s*</loc>", xml):
+            entries.append((loc.strip(), ""))
+    return entries
+
+
 def _find_articles(site, max_articles=30):
-    """Find recent article URLs from a blog site (homepage + sitemap)."""
+    """Find recent article URLs from a blog site. Prefers sitemap (real posts,
+    sorted newest-first) over homepage links (often category pages)."""
     root = _root(site)
     base = "https://" + root
-    articles = set()
+    articles = []
+    seen = set()
 
-    # 1. Try homepage — collect internal links that look like articles
-    html = _fetch(base)
-    if not html:
-        html = _fetch("http://" + root)  # fallback to http
-    if html:
-        soup = BeautifulSoup(html, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            full = urljoin(base, href)
-            if _root(full) != root:
-                continue
-            path = urlparse(full).path.strip("/")
-            if not path:
-                continue
-            low = path.lower()
-            # Skip obvious non-article pages
-            if any(x in low for x in ["/tag/", "/category/", "/author/", "/page/",
-                                       "/wp-", "/feed", "/cart", "/shop", "/product",
-                                       "contact", "about", "privacy", "terms",
-                                       ".jpg", ".png", ".css", ".js", "#"]):
-                continue
-            # Article-like: has a slug (word-word-word) OR nested path
-            if ("-" in path and len(path) > 10) or path.count("/") >= 1:
-                articles.add(full.split("#")[0].split("?")[0])
+    def _add(url):
+        u = url.split("#")[0].split("?")[0].rstrip("/")
+        if u not in seen and _root(u) == root and not u.endswith(".xml"):
+            seen.add(u)
+            articles.append(u)
+
+    # 1. SITEMAP FIRST — real dated posts, newest-first
+    sitemap_urls = ["/post-sitemap.xml", "/post-sitemap1.xml", "/sitemap-posts.xml",
+                    "/wp-sitemap-posts-post-1.xml", "/sitemap_index.xml",
+                    "/sitemap.xml", "/wp-sitemap.xml", "/news-sitemap.xml"]
+    for sm in sitemap_urls:
+        sm_html = _fetch(base + sm)
+        if not sm_html:
+            continue
+        entries = _parse_sitemap_entries(sm_html)
+        if not entries:
+            continue
+        # Sitemap index? follow post/news sub-sitemaps
+        sub_sitemaps = [u for u, _ in entries if u.endswith(".xml")]
+        if sub_sitemaps:
+            all_entries = []
+            for sub in sub_sitemaps:
+                if any(k in sub.lower() for k in ["post", "article", "news", "blog"]):
+                    sub_html = _fetch(sub)
+                    if sub_html:
+                        all_entries.extend(_parse_sitemap_entries(sub_html))
+                if len(all_entries) >= max_articles * 2:
+                    break
+            entries = all_entries or entries
+        # Sort newest-first by lastmod (empty dates go last)
+        entries.sort(key=lambda x: x[1] or "0", reverse=True)
+        for url, _mod in entries:
+            _add(url)
             if len(articles) >= max_articles:
                 break
+        if len(articles) >= max_articles:
+            break
 
-    # 2. Try sitemaps for more articles (post sitemap preferred)
-    if len(articles) < max_articles:
-        for sm in ["/post-sitemap.xml", "/sitemap.xml", "/sitemap_index.xml",
-                   "/sitemap-posts.xml", "/wp-sitemap.xml"]:
-            sm_html = _fetch(base + sm)
-            if not sm_html:
-                continue
-            locs = re.findall(r"<loc>(.*?)</loc>", sm_html)
-            # If this is a sitemap index, follow the first post-sitemap
-            if locs and any(".xml" in l for l in locs):
-                for sub in locs:
-                    if "post" in sub.lower() or "article" in sub.lower():
-                        sub_html = _fetch(sub)
-                        if sub_html:
-                            locs = re.findall(r"<loc>(.*?)</loc>", sub_html)
-                        break
-            for loc in locs:
-                loc = loc.strip()
-                if _root(loc) == root and not loc.endswith(".xml"):
-                    articles.add(loc)
+    # 2. HOMEPAGE FALLBACK — only if sitemap gave little
+    if len(articles) < 5:
+        html = _fetch(base) or _fetch("http://" + root)
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True):
+                full = urljoin(base, a["href"])
+                if _root(full) != root:
+                    continue
+                path = urlparse(full).path.strip("/")
+                if not path:
+                    continue
+                low = path.lower()
+                if any(x in low for x in ["/tag/", "/category/", "/author/", "/page/",
+                                          "/wp-", "/feed", "contact", "about", "privacy",
+                                          "terms", ".jpg", ".png", ".css", ".js"]):
+                    continue
+                last = path.split("/")[-1]
+                looks_like_article = (last.count("-") >= 2 and len(last) > 15) or path.count("/") >= 2
+                if looks_like_article:
+                    _add(full)
                 if len(articles) >= max_articles:
                     break
-            if articles:
-                break
 
-    return list(articles)[:max_articles]
+    return articles[:max_articles]
 
 
 def _extract_external_links(article_url):
@@ -139,24 +167,40 @@ def _extract_external_links(article_url):
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    # Focus on article body if possible
-    body = soup.find("article") or soup.find("main") or soup
+
+    # Remove nav, header, footer, sidebar, menus — links there aren't guest-post links
+    for tag in soup.find_all(["nav", "header", "footer", "aside"]):
+        tag.decompose()
+    for tag in soup.find_all(class_=re.compile(r"(menu|nav|sidebar|footer|header|widget|related|share|social|comment)", re.I)):
+        tag.decompose()
+
+    # Prefer the article content container; fall back to whole cleaned page
+    body = (soup.find("article")
+            or soup.find("div", class_=re.compile(r"(entry-content|post-content|article-content|td-post-content|single-content|post-body|content-area)", re.I))
+            or soup.find("main")
+            or soup)
+
     links = []
     seen_domains = set()
     for a in body.find_all("a", href=True):
-        href = a["href"]
+        href = a["href"].strip()
         if not href.startswith("http"):
             continue
         target_root = _root(href)
-        if not target_root or target_root == root:
-            continue  # internal link — skip
+        if not target_root:
+            continue
+        # Skip internal links (same root, ignoring www / subdomain)
+        bare_root = root.replace("www.", "")
+        bare_target = target_root.replace("www.", "")
+        if bare_target == bare_root or bare_root.endswith("." + bare_target) or bare_target.endswith("." + bare_root):
+            continue
         if _is_skip(target_root):
             continue  # giant site — skip
         # Dedupe within THIS article: same domain -> keep only 1
-        if target_root in seen_domains:
+        if bare_target in seen_domains:
             continue
-        seen_domains.add(target_root)
-        links.append((target_root, href.split("#")[0]))
+        seen_domains.add(bare_target)
+        links.append((bare_target, href.split("#")[0]))
     return links
 
 

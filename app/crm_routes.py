@@ -1039,13 +1039,11 @@ def blog_debug(site: str = "techbullion.com"):
     out = {"site": site}
     root = blog_research._root(site)
     out["root"] = root
-    # 1. Can we fetch the homepage?
     html = blog_research._fetch("https://" + root)
     if not html:
         html = blog_research._fetch("http://" + root)
     out["homepage_fetched"] = bool(html)
     out["homepage_size"] = len(html) if html else 0
-    # 2. How many articles found?
     try:
         articles = blog_research._find_articles(site, max_articles=30)
         out["articles_found"] = len(articles)
@@ -1053,12 +1051,17 @@ def blog_debug(site: str = "techbullion.com"):
     except Exception as e:
         out["articles_error"] = str(e)
         articles = []
-    # 3. External links from first article?
-    if articles:
+    # Check links in first 3 articles (not just 1)
+    total_links = 0
+    article_links = []
+    for art in articles[:3]:
         try:
-            links = blog_research._extract_external_links(articles[0])
-            out["links_in_first_article"] = len(links)
-            out["sample_links"] = [l[0] for l in links[:10]]
+            links = blog_research._extract_external_links(art)
+            total_links += len(links)
+            article_links.append({"article": art, "links": len(links),
+                                   "domains": [l[0] for l in links[:8]]})
         except Exception as e:
-            out["links_error"] = str(e)
+            article_links.append({"article": art, "error": str(e)})
+    out["total_links_in_first_3"] = total_links
+    out["per_article"] = article_links
     return out
