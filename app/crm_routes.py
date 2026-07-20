@@ -826,7 +826,7 @@ _blog_stop = {}
 
 @router.post("/blog/create")
 def create_blog_job(name: str = "", sites: str = "", time_range: str = "1m",
-                    max_articles: int = 30, autopilot: bool = False,
+                    max_articles: int = 150, autopilot: bool = False,
                     db: Session = Depends(get_db)):
     """Create a blog research job. sites = comma/newline separated domains."""
     from .crm_models import BlogResearchJob
@@ -913,11 +913,66 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 bg.commit()
 
             j = bg.get(BlogResearchJob, job_id)
-            j.status = "done"; j.phase = "done"
+            j.status = "done"; j.phase = "emails"
             j.links_found = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id).count()
             bg.commit()
-            print(f"[BlogResearch] Job {job_id} complete: {j.links_found} links")
+            print(f"[BlogResearch] Job {job_id} research complete: {j.links_found} links")
+
+            # AUTO email scrape — no button needed. Scrape emails from every
+            # discovered domain using the main scraper (client+vendor logic),
+            # in parallel, and add found emails to the client send list.
+            from . import scraper as _scraper
+            from .crm_models import OutreachEntry
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
+            pending_links = bg.query(BlogResearchLink).filter(
+                BlogResearchLink.job_id == job_id,
+                BlogResearchLink.email_status == "pending").all()
+            link_ids = [l.id for l in pending_links]
+
+            def _scrape_one(link_id):
+                s = SessionLocal()
+                try:
+                    lk = s.get(BlogResearchLink, link_id)
+                    if not lk:
+                        return
+                    try:
+                        res = _scraper.extract_domain(lk.target_domain, mode="client")
+                        contacts = res.get("contacts", [])
+                        if contacts:
+                            email = contacts[0].get("email", "")
+                            lk.email = email
+                            lk.email_status = "found"
+                            exists = s.query(OutreachEntry).filter(
+                                OutreachEntry.email == email).first()
+                            if not exists and email:
+                                s.add(OutreachEntry(
+                                    mode="client", email=email, domain=lk.target_domain,
+                                    email_type="blog_research", confidence="medium",
+                                    source_url=lk.target_url, status="pending"))
+                        else:
+                            lk.email_status = "no_email"
+                        s.commit()
+                    except Exception:
+                        lk.email_status = "no_email"
+                        s.commit()
+                finally:
+                    s.close()
+
+            print(f"[BlogResearch] Auto-scraping emails for {len(link_ids)} domains...")
+            with _TPE(max_workers=10) as ex:
+                list(ex.map(_scrape_one, link_ids))
+
+            # Update emails_found count + mark fully done
+            jj = bg.get(BlogResearchJob, job_id)
+            if jj:
+                jj.emails_found = bg.query(BlogResearchLink).filter(
+                    BlogResearchLink.job_id == job_id,
+                    BlogResearchLink.email_status == "found").count()
+                jj.phase = "done"
+                bg.commit()
+            print(f"[BlogResearch] Job {job_id} FULLY done: {jj.emails_found if jj else 0} emails found")
         except Exception as e:
             import traceback
             print(f"[BlogResearch] Job {job_id} FATAL ERROR: {e}")
@@ -1045,7 +1100,7 @@ def blog_debug(site: str = "techbullion.com"):
     out["homepage_fetched"] = bool(html)
     out["homepage_size"] = len(html) if html else 0
     try:
-        articles = blog_research._find_articles(site, max_articles=30)
+        articles = blog_research._find_articles(site, max_articles=150)
         out["articles_found"] = len(articles)
         out["sample_articles"] = articles[:5]
     except Exception as e:

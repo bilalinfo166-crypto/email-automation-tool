@@ -176,7 +176,7 @@ class BlogResearchJob(Base):
     name: Mapped[str] = mapped_column(String, default="")
     sites: Mapped[str] = mapped_column(Text, default="")        # comma/newline separated
     time_range: Mapped[str] = mapped_column(String, default="1m")
-    max_articles: Mapped[int] = mapped_column(Integer, default=30)
+    max_articles: Mapped[int] = mapped_column(Integer, default=150)
     status: Mapped[str] = mapped_column(String, default="pending")  # pending/running/done/stopped
     total_sites: Mapped[int] = mapped_column(Integer, default=0)
     done_sites: Mapped[int] = mapped_column(Integer, default=0)

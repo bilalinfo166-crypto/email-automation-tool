@@ -24,18 +24,46 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
 
-# Giant sites to skip — never useful as guest-post prospects
+# Giant / premium sites to skip — these are huge authority sites we can't pitch
+# as guest-post clients (they don't buy our service). Only smaller business sites
+# that are actively paying for guest posts are useful prospects.
 SKIP_DOMAINS = {
+    # Social / video / big platforms
     "youtube.com", "youtu.be", "facebook.com", "fb.com", "instagram.com",
     "linkedin.com", "twitter.com", "x.com", "wikipedia.org", "quora.com",
     "medium.com", "reddit.com", "pinterest.com", "tiktok.com", "tumblr.com",
+    "vimeo.com", "flickr.com", "soundcloud.com", "spotify.com", "twitch.tv",
+    "snapchat.com", "threads.net", "mastodon.social", "discord.com",
+    # Big tech
     "google.com", "goo.gl", "amazon.com", "apple.com", "microsoft.com",
     "github.com", "gravatar.com", "wordpress.com", "wordpress.org",
-    "w3.org", "schema.org", "gstatic.com", "googleapis.com", "cloudflare.com",
-    "bit.ly", "t.co", "buffer.com", "feedburner.com", "gmpg.org",
-    "yahoo.com", "bing.com", "vimeo.com", "flickr.com", "soundcloud.com",
-    "spotify.com", "paypal.com", "wa.me", "t.me", "whatsapp.com",
-    "creativecommons.org", "mozilla.org", "adobe.com", "wix.com",
+    "adobe.com", "mozilla.org", "oracle.com", "ibm.com", "intel.com",
+    "salesforce.com", "cloudflare.com", "googleapis.com", "gstatic.com",
+    "googleusercontent.com", "play.google.com", "chrome.google.com",
+    # Premium news / media (huge DA — never our clients)
+    "forbes.com", "cnet.com", "techcrunch.com", "wired.com", "theverge.com",
+    "nytimes.com", "wsj.com", "bloomberg.com", "reuters.com", "cnn.com",
+    "bbc.com", "bbc.co.uk", "theguardian.com", "washingtonpost.com",
+    "businessinsider.com", "entrepreneur.com", "inc.com", "mashable.com",
+    "engadget.com", "gizmodo.com", "arstechnica.com", "venturebeat.com",
+    "huffpost.com", "huffingtonpost.com", "usatoday.com", "time.com",
+    "fortune.com", "economist.com", "ft.com", "forbes.com", "npr.org",
+    "buzzfeed.com", "vox.com", "vice.com", "slate.com", "axios.com",
+    "hbr.org", "fastcompany.com", "wikihow.com", "investopedia.com",
+    # Data / stats / research portals (not clients)
+    "statista.com", "similarweb.com", "semrush.com", "ahrefs.com",
+    "atlas.media.mit.edu", "mit.edu", "harvard.edu", "stanford.edu",
+    "researchgate.net", "sciencedirect.com", "springer.com", "jstor.org",
+    "scholar.google.com", "arxiv.org", "ssrn.com", "nature.com",
+    # Retail / marketplace giants
+    "ebay.com", "walmart.com", "etsy.com", "alibaba.com", "shopify.com",
+    "aliexpress.com", "target.com", "bestbuy.com", "shopify.com",
+    # Utilities / infra / misc
+    "w3.org", "schema.org", "bit.ly", "t.co", "buffer.com", "feedburner.com",
+    "gmpg.org", "creativecommons.org", "wix.com", "squarespace.com",
+    "yahoo.com", "bing.com", "paypal.com", "wa.me", "t.me", "whatsapp.com",
+    "archive.org", "web.archive.org", "imdb.com", "yelp.com", "tripadvisor.com",
+    "booking.com", "airbnb.com", "uber.com", "netflix.com", "cloudfront.net",
 }
 
 TIME_RANGES = {
