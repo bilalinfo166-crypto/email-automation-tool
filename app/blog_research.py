@@ -88,8 +88,19 @@ TIME_RANGES = {
     "1y": timedelta(days=365),
 }
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+              "image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 
 # Shared session with a big connection pool — reusing connections is dramatically
 # faster than opening a new TCP+TLS handshake for every single article fetch.
@@ -125,6 +136,13 @@ def _is_skip(domain):
 def _fetch(url, timeout=8):
     try:
         r = _session.get(url, timeout=timeout, allow_redirects=True)
+        # Rate-limited (Cloudflare 1015 usually comes as 429 or 503) — back off once
+        if r.status_code in (429, 503):
+            time.sleep(2)
+            try:
+                r = _session.get(url, timeout=timeout, allow_redirects=True)
+            except Exception:
+                return None
         if r.status_code == 200:
             return r.text
     except Exception:
@@ -148,19 +166,95 @@ def _parse_sitemap_entries(xml):
     return entries
 
 
-def _find_articles(site, max_articles=30):
-    """Find recent article URLs from a blog site. Prefers sitemap (real posts,
-    sorted newest-first) over homepage links (often category pages)."""
+def _parse_date(s):
+    """Parse a date string (sitemap lastmod is ISO-8601). Returns datetime or None."""
+    if not s:
+        return None
+    s = s.strip()
+    # Take just the date part (drop time/timezone): 2018-02-13T10:30:00+00:00
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except Exception:
+            return None
+    return None
+
+
+def _date_from_html(html):
+    """Extract an article's published date from its HTML. Checks meta tags,
+    JSON-LD, and <time> elements. Returns datetime or None."""
+    if not html:
+        return None
+    # 1) Open Graph / article meta tags
+    for pat in [
+        r'property=["\']article:published_time["\'][^>]*content=["\']([^"\']+)["\']',
+        r'content=["\']([^"\']+)["\'][^>]*property=["\']article:published_time["\']',
+        r'name=["\']publish[-_]?date["\'][^>]*content=["\']([^"\']+)["\']',
+        r'name=["\']date["\'][^>]*content=["\']([^"\']+)["\']',
+        r'property=["\']og:updated_time["\'][^>]*content=["\']([^"\']+)["\']',
+        r'itemprop=["\']datePublished["\'][^>]*content=["\']([^"\']+)["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            d = _parse_date(m.group(1))
+            if d:
+                return d
+    # 2) JSON-LD "datePublished":"2020-..."
+    m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', html)
+    if m:
+        d = _parse_date(m.group(1))
+        if d:
+            return d
+    # 3) <time datetime="2020-...">
+    m = re.search(r'<time[^>]*datetime=["\']([^"\']+)["\']', html, re.I)
+    if m:
+        d = _parse_date(m.group(1))
+        if d:
+            return d
+    return None
+
+
+def _is_cloudflare_blocked(html):
+    """Detect Cloudflare access-denied / rate-limit (error 1015, 1020 etc.)."""
+    if not html:
+        return False
+    low = html.lower()
+    return ("cloudflare" in low and
+            ("error 1015" in low or "error 1020" in low or "access denied" in low
+             or "rate limited" in low or "you are being rate limited" in low
+             or "attention required" in low))
+
+
+def _find_articles(site, max_articles=30, time_range="1m"):
+    """Find recent article URLs from a blog site within the time range.
+    Prefers sitemap (real dated posts, newest-first). Filters out articles
+    older than the cutoff using sitemap <lastmod> dates and URL-embedded dates."""
     root = _root(site)
     base = "https://" + root
     articles = []
     seen = set()
 
-    def _add(url):
+    # Date cutoff: articles older than this are skipped
+    delta = TIME_RANGES.get(time_range, timedelta(days=30))
+    cutoff = datetime.utcnow() - delta
+
+    def _too_old(url, lastmod):
+        """True if the article is older than the cutoff. If we have NO date
+        signal at all, keep it (don't wrongly drop undated posts)."""
+        d = _parse_date(lastmod) or _date_from_url(url)
+        if d is None:
+            return False  # no date info — keep (better than dropping good posts)
+        return d < cutoff
+
+    def _add(url, lastmod=""):
         u = url.split("#")[0].split("?")[0].rstrip("/")
-        if u not in seen and _root(u) == root and not u.endswith(".xml"):
-            seen.add(u)
-            articles.append(u)
+        if u in seen or _root(u) != root or u.endswith(".xml"):
+            return
+        if _too_old(u, lastmod):
+            return  # older than the selected time range — skip
+        seen.add(u)
+        articles.append(u)
 
     # 1. SITEMAP FIRST — real dated posts, newest-first
     sitemap_urls = ["/post-sitemap.xml", "/post-sitemap1.xml", "/sitemap-posts.xml",
@@ -182,13 +276,13 @@ def _find_articles(site, max_articles=30):
                     sub_html = _fetch(sub)
                     if sub_html:
                         all_entries.extend(_parse_sitemap_entries(sub_html))
-                if len(all_entries) >= max_articles * 2:
+                if len(all_entries) >= max_articles * 3:
                     break
             entries = all_entries or entries
         # Sort newest-first by lastmod (empty dates go last)
         entries.sort(key=lambda x: x[1] or "0", reverse=True)
         for url, _mod in entries:
-            _add(url)
+            _add(url, _mod)
             if len(articles) >= max_articles:
                 break
         if len(articles) >= max_articles:
@@ -214,24 +308,39 @@ def _find_articles(site, max_articles=30):
                 last = path.split("/")[-1]
                 looks_like_article = (last.count("-") >= 2 and len(last) > 15) or path.count("/") >= 2
                 if looks_like_article:
-                    _add(full)
+                    _add(full)  # homepage links have no lastmod; URL date checked inside
                 if len(articles) >= max_articles:
                     break
 
     return articles[:max_articles]
 
 
-def _extract_external_links(article_url):
+def _extract_external_links(article_url, cutoff=None):
     """Get ONLY organic editorial links from the article body.
+
+    If cutoff is given, the article's own published date (from its HTML) is
+    checked — articles older than cutoff return [] (final date safety net for
+    when sitemap lastmod / URL date were missing).
 
     Excludes: ads, sponsored/promoted widgets (Taboola/Outbrain/etc), affiliate
     links, related-post widgets, share buttons, author bios, CTAs, image-only
-    links, and rel=sponsored/nofollow links. Keeps only real in-content anchor
-    links that a writer placed inside the article text."""
+    links, and rel=sponsored links. Keeps only real in-content anchor links."""
     root = _root(article_url)
     html = _fetch(article_url)
     if not html:
         return []
+
+    # Cloudflare rate-limit / access-denied page — no real content, skip quietly
+    if _is_cloudflare_blocked(html):
+        print(f"[BlogResearch]   (cloudflare blocked) {article_url}")
+        return []
+
+    # FINAL date safety net: if the article's HTML says it's older than the
+    # cutoff, drop it — even if sitemap/URL gave no date.
+    if cutoff is not None:
+        pub = _date_from_html(html)
+        if pub is not None and pub < cutoff:
+            return []
     soup = BeautifulSoup(html, "html.parser")
 
     # 1) Strip structural chrome — nav/header/footer/sidebar aren't article links
@@ -317,12 +426,16 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
       on_article(article_url, count) — as each article is opened
       on_link(link_dict) — for each new external link found."""
     results = []
-    articles = _find_articles(site, max_articles)
+    articles = _find_articles(site, max_articles, time_range)
     global_seen_domains = set()
     counter = [0]
 
+    # Cutoff for the per-article date safety net (checks the article's own HTML)
+    delta = TIME_RANGES.get(time_range, timedelta(days=30))
+    cutoff = datetime.utcnow() - delta
+
     def _do_article(article):
-        return (article, _extract_external_links(article))
+        return (article, _extract_external_links(article, cutoff))
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_do_article, a) for a in articles]
