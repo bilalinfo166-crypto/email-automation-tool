@@ -180,7 +180,10 @@ class BlogResearchJob(Base):
     status: Mapped[str] = mapped_column(String, default="pending")  # pending/running/done/stopped
     total_sites: Mapped[int] = mapped_column(Integer, default=0)
     done_sites: Mapped[int] = mapped_column(Integer, default=0)
+    articles_found: Mapped[int] = mapped_column(Integer, default=0)
     links_found: Mapped[int] = mapped_column(Integer, default=0)
+    emails_found: Mapped[int] = mapped_column(Integer, default=0)
+    phase: Mapped[str] = mapped_column(String, default="")  # articles/links/emails
     autopilot: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

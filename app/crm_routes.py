@@ -862,47 +862,56 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
         try:
             j = bg.get(BlogResearchJob, job_id)
             j.status = "running"; j.done_sites = 0; j.links_found = 0
+            j.articles_found = 0; j.phase = "articles"
             bg.commit()
             sites = [s for s in j.sites.split(",") if s]
+            seen_domains = set()  # global dedupe across all sites
 
-            def on_progress(site, count):
-                jj = bg.get(BlogResearchJob, job_id)
-                if jj:
-                    jj.done_sites = (jj.done_sites or 0) + 1
-                    bg.commit()
-
-            # Research each site, save links as we go
             for site in sites:
                 if _blog_stop.get(job_id, {}).get("stop"):
                     break
-                try:
-                    results = blog_research.research_site(site, j.time_range, j.max_articles, workers=10)
-                    for r in results:
-                        # Global dedupe: skip if this target domain already saved for this job
-                        exists = bg.query(BlogResearchLink).filter(
-                            BlogResearchLink.job_id == job_id,
-                            BlogResearchLink.target_domain == r["target_domain"]).first()
-                        if exists:
-                            continue
-                        link = BlogResearchLink(
-                            job_id=job_id, source_site=r["source_site"],
-                            source_article=r["source_article"],
-                            target_domain=r["target_domain"], target_url=r["target_url"],
-                        )
-                        bg.add(link)
+
+                # Live callback: article opened
+                def on_article(article_url, count):
+                    jj = bg.get(BlogResearchJob, job_id)
+                    if jj:
+                        jj.articles_found = (jj.articles_found or 0) + 1
+                        jj.phase = "articles"
+                        bg.commit()
+
+                # Live callback: new link found -> save immediately
+                def on_link(r):
+                    if r["target_domain"] in seen_domains:
+                        return
+                    seen_domains.add(r["target_domain"])
+                    link = BlogResearchLink(
+                        job_id=job_id, source_site=r["source_site"],
+                        source_article=r["source_article"],
+                        target_domain=r["target_domain"], target_url=r["target_url"],
+                    )
+                    bg.add(link)
+                    jj = bg.get(BlogResearchJob, job_id)
+                    if jj:
+                        jj.links_found = (jj.links_found or 0) + 1
+                        jj.phase = "links"
                     bg.commit()
+
+                try:
+                    blog_research.research_site(site, j.time_range, j.max_articles,
+                                                workers=10, on_article=on_article,
+                                                on_link=on_link)
                 except Exception as e:
                     print(f"[BlogResearch] {site}: {e}")
+
                 jj = bg.get(BlogResearchJob, job_id)
                 jj.done_sites = (jj.done_sites or 0) + 1
-                jj.links_found = bg.query(BlogResearchLink).filter(
-                    BlogResearchLink.job_id == job_id).count()
                 bg.commit()
 
             j = bg.get(BlogResearchJob, job_id)
-            j.status = "done"
+            j.status = "done"; j.phase = "done"
             j.links_found = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id).count()
+            bg.commit()
             bg.commit()
         except Exception as e:
             print(f"[BlogResearch] Job error: {e}")
@@ -931,7 +940,9 @@ def list_blog_jobs(db: Session = Depends(get_db)):
     jobs = db.query(BlogResearchJob).order_by(BlogResearchJob.id.desc()).all()
     return [{"id": j.id, "name": j.name, "status": j.status,
              "total_sites": j.total_sites, "done_sites": j.done_sites,
-             "links_found": j.links_found, "time_range": j.time_range,
+             "articles_found": j.articles_found or 0,
+             "links_found": j.links_found, "emails_found": j.emails_found or 0,
+             "phase": j.phase or "", "time_range": j.time_range,
              "autopilot": j.autopilot,
              "created_at": j.created_at.isoformat() if j.created_at else ""} for j in jobs]
 

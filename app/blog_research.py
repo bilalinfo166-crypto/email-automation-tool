@@ -160,15 +160,17 @@ def _extract_external_links(article_url):
     return links
 
 
-def research_site(site, time_range="1m", max_articles=30, workers=10):
+def research_site(site, time_range="1m", max_articles=30, workers=10,
+                  on_article=None, on_link=None):
     """Research one blog site: find articles, extract external links.
-    Articles are processed in PARALLEL (10 workers) for speed.
-    Returns list of dicts: {source_site, source_article, target_domain, target_url}."""
+    Articles processed in PARALLEL (10 workers). Live callbacks:
+      on_article(article_url, count) — as each article is opened
+      on_link(link_dict) — for each new external link found."""
     results = []
     articles = _find_articles(site, max_articles)
     global_seen_domains = set()
+    counter = [0]
 
-    # Open articles in parallel — 10 at a time
     def _do_article(article):
         return (article, _extract_external_links(article))
 
@@ -179,17 +181,24 @@ def research_site(site, time_range="1m", max_articles=30, workers=10):
                 article, links = fut.result()
             except Exception:
                 continue
+            counter[0] += 1
+            if on_article:
+                try: on_article(article, counter[0])
+                except Exception: pass
             for target_domain, target_url in links:
-                # Global dedupe across this site: same target domain once per site
                 if target_domain in global_seen_domains:
                     continue
                 global_seen_domains.add(target_domain)
-                results.append({
+                link_data = {
                     "source_site": _root(site),
                     "source_article": article,
                     "target_domain": target_domain,
                     "target_url": target_url,
-                })
+                }
+                results.append(link_data)
+                if on_link:
+                    try: on_link(link_data)
+                    except Exception: pass
     return results
 
 
