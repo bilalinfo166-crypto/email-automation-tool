@@ -85,6 +85,9 @@ def _migrate():
 
 
 def init_db():
+    # Import ALL models so they register with Base before create_all.
+    # Without this, new tables (like blog research) never get created.
+    from . import crm_models  # noqa: F401
     Base.metadata.create_all(bind=engine)
     try:
         _migrate()
