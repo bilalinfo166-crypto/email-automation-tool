@@ -119,11 +119,17 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 if sender.sent_today >= sender.daily_cap:
                     continue  # skip this sender, try next email with next sender
 
-                # Round-robin template
-                template = get_template(template_idx)
+                # Round-robin template (vendor mode uses vendor templates)
+                if mode == "vendor":
+                    from .vendor_templates import get_vendor_template, render_vendor_template
+                    template = get_vendor_template(template_idx)
+                    variables = _build_variables(entry, sender)
+                    rendered = render_vendor_template(template, variables)
+                else:
+                    template = get_template(template_idx)
+                    variables = _build_variables(entry, sender)
+                    rendered = render_template(template, variables)
                 template_idx += 1
-                variables = _build_variables(entry, sender)
-                rendered = render_template(template, variables)
 
                 # VERIFY email before sending (MX check) — reduces bounces
                 try:

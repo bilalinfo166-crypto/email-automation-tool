@@ -593,8 +593,11 @@ def stop_sending(campaign_id: int, db: Session = Depends(get_db)):
 # ============ TEMPLATES ============
 
 @router.get("/templates")
-def list_templates():
-    """Return all 50 outreach templates."""
+def list_templates(mode: str = "client"):
+    """Return outreach templates for the mode: client (guest post service) or vendor (asking sites)."""
+    if mode == "vendor":
+        from .vendor_templates import VENDOR_TEMPLATES
+        return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(VENDOR_TEMPLATES)]
     from .email_templates import TEMPLATES
     return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(TEMPLATES)]
 
