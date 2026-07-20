@@ -77,32 +77,56 @@ def _find_articles(site, max_articles=30):
     base = "https://" + root
     articles = set()
 
-    # Try homepage — collect internal links that look like articles
+    # 1. Try homepage — collect internal links that look like articles
     html = _fetch(base)
+    if not html:
+        html = _fetch("http://" + root)  # fallback to http
     if html:
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=True):
             href = a["href"]
             full = urljoin(base, href)
-            if _root(full) == root:
-                path = urlparse(full).path.strip("/")
-                # Article-like: has a slug, not a category/tag/author page
-                if path and "/" in path or (path and len(path) > 12 and "-" in path):
-                    if not any(x in path.lower() for x in ["/tag/", "/category/", "/author/", "/page/", "/wp-", "/feed"]):
-                        articles.add(full.split("#")[0].split("?")[0])
+            if _root(full) != root:
+                continue
+            path = urlparse(full).path.strip("/")
+            if not path:
+                continue
+            low = path.lower()
+            # Skip obvious non-article pages
+            if any(x in low for x in ["/tag/", "/category/", "/author/", "/page/",
+                                       "/wp-", "/feed", "/cart", "/shop", "/product",
+                                       "contact", "about", "privacy", "terms",
+                                       ".jpg", ".png", ".css", ".js", "#"]):
+                continue
+            # Article-like: has a slug (word-word-word) OR nested path
+            if ("-" in path and len(path) > 10) or path.count("/") >= 1:
+                articles.add(full.split("#")[0].split("?")[0])
             if len(articles) >= max_articles:
                 break
 
-    # Also try sitemap for more articles
+    # 2. Try sitemaps for more articles (post sitemap preferred)
     if len(articles) < max_articles:
-        for sm in ["/sitemap.xml", "/sitemap_index.xml", "/post-sitemap.xml"]:
+        for sm in ["/post-sitemap.xml", "/sitemap.xml", "/sitemap_index.xml",
+                   "/sitemap-posts.xml", "/wp-sitemap.xml"]:
             sm_html = _fetch(base + sm)
-            if sm_html:
-                for loc in re.findall(r"<loc>(.*?)</loc>", sm_html)[:max_articles]:
-                    if _root(loc) == root:
-                        articles.add(loc.strip())
-                    if len(articles) >= max_articles:
+            if not sm_html:
+                continue
+            locs = re.findall(r"<loc>(.*?)</loc>", sm_html)
+            # If this is a sitemap index, follow the first post-sitemap
+            if locs and any(".xml" in l for l in locs):
+                for sub in locs:
+                    if "post" in sub.lower() or "article" in sub.lower():
+                        sub_html = _fetch(sub)
+                        if sub_html:
+                            locs = re.findall(r"<loc>(.*?)</loc>", sub_html)
                         break
+            for loc in locs:
+                loc = loc.strip()
+                if _root(loc) == root and not loc.endswith(".xml"):
+                    articles.add(loc)
+                if len(articles) >= max_articles:
+                    break
+            if articles:
                 break
 
     return list(articles)[:max_articles]
@@ -136,25 +160,36 @@ def _extract_external_links(article_url):
     return links
 
 
-def research_site(site, time_range="1m", max_articles=30):
+def research_site(site, time_range="1m", max_articles=30, workers=10):
     """Research one blog site: find articles, extract external links.
+    Articles are processed in PARALLEL (10 workers) for speed.
     Returns list of dicts: {source_site, source_article, target_domain, target_url}."""
     results = []
     articles = _find_articles(site, max_articles)
     global_seen_domains = set()
-    for article in articles:
-        links = _extract_external_links(article)
-        for target_domain, target_url in links:
-            # Global dedupe across this site: same target domain once per site
-            if target_domain in global_seen_domains:
+
+    # Open articles in parallel — 10 at a time
+    def _do_article(article):
+        return (article, _extract_external_links(article))
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_do_article, a) for a in articles]
+        for fut in as_completed(futures):
+            try:
+                article, links = fut.result()
+            except Exception:
                 continue
-            global_seen_domains.add(target_domain)
-            results.append({
-                "source_site": _root(site),
-                "source_article": article,
-                "target_domain": target_domain,
-                "target_url": target_url,
-            })
+            for target_domain, target_url in links:
+                # Global dedupe across this site: same target domain once per site
+                if target_domain in global_seen_domains:
+                    continue
+                global_seen_domains.add(target_domain)
+                results.append({
+                    "source_site": _root(site),
+                    "source_article": article,
+                    "target_domain": target_domain,
+                    "target_url": target_url,
+                })
     return results
 
 

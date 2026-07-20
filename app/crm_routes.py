@@ -876,7 +876,7 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 if _blog_stop.get(job_id, {}).get("stop"):
                     break
                 try:
-                    results = blog_research.research_site(site, j.time_range, j.max_articles)
+                    results = blog_research.research_site(site, j.time_range, j.max_articles, workers=10)
                     for r in results:
                         # Global dedupe: skip if this target domain already saved for this job
                         exists = bg.query(BlogResearchLink).filter(
