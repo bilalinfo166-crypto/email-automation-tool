@@ -1030,3 +1030,35 @@ def delete_blog_job(job_id: int, db: Session = Depends(get_db)):
         db.query(BlogResearchLink).filter(BlogResearchLink.job_id == job_id).delete()
         db.delete(job); db.commit()
     return {"deleted": job_id}
+
+
+@router.get("/blog/debug")
+def blog_debug(site: str = "techbullion.com"):
+    """Diagnostic: test what the engine sees for a given site."""
+    from . import blog_research
+    out = {"site": site}
+    root = blog_research._root(site)
+    out["root"] = root
+    # 1. Can we fetch the homepage?
+    html = blog_research._fetch("https://" + root)
+    if not html:
+        html = blog_research._fetch("http://" + root)
+    out["homepage_fetched"] = bool(html)
+    out["homepage_size"] = len(html) if html else 0
+    # 2. How many articles found?
+    try:
+        articles = blog_research._find_articles(site, max_articles=30)
+        out["articles_found"] = len(articles)
+        out["sample_articles"] = articles[:5]
+    except Exception as e:
+        out["articles_error"] = str(e)
+        articles = []
+    # 3. External links from first article?
+    if articles:
+        try:
+            links = blog_research._extract_external_links(articles[0])
+            out["links_in_first_article"] = len(links)
+            out["sample_links"] = [l[0] for l in links[:10]]
+        except Exception as e:
+            out["links_error"] = str(e)
+    return out
