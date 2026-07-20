@@ -165,6 +165,7 @@ class OutreachEntry(Base):
     replied_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     sender_email: Mapped[str] = mapped_column(String, default="")  # which sender sent this
     subject: Mapped[str] = mapped_column(String, default="")
+    unsub_token: Mapped[str] = mapped_column(String, default="", index=True)  # unique per-email unsubscribe token
     days_since_sent: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

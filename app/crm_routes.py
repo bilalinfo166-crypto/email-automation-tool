@@ -1,6 +1,7 @@
 """CRM API: domains, compliant scraping, contacts, suppression, campaigns
 (with the review->approve compliance gate), queue, sending, and analytics."""
 import re
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -1004,6 +1005,63 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 jj.phase = "done"
                 bg.commit()
             print(f"[BlogResearch] Job {job_id} FULLY done: {jj.emails_found if jj else 0} emails found")
+
+            # ============ AUTOPILOT: auto-send if enabled ============
+            # If this job was created with autopilot=ON, automatically create a
+            # client campaign from the freshly-scraped emails and start sending —
+            # no manual button needed. Research -> scrape -> send, fully hands-off.
+            if jj and jj.autopilot:
+                try:
+                    from .crm_models import OutreachEntry
+                    from .database import Sender
+                    from . import send_engine
+
+                    # Count pending client emails ready to send
+                    pending_count = bg.query(OutreachEntry).filter(
+                        OutreachEntry.mode == "client",
+                        OutreachEntry.status == "pending").count()
+
+                    # Need at least one active (non-failed) client sender
+                    active_senders = bg.query(Sender).filter(
+                        Sender.mode == "client",
+                        Sender.status.notin_(["auth_failed", "verifying"])
+                    ).all()
+
+                    if pending_count > 0 and active_senders:
+                        camp = Campaign(
+                            name=f"Autopilot — {jj.name} ({pending_count} emails)",
+                            mode="client",
+                            status="ready",
+                            sender_emails=",".join(s.email for s in active_senders),
+                            emails_per_batch=10,
+                            delay_seconds=30,
+                            min_delay_sec=15,
+                            max_delay_sec=40,
+                            autopilot=True,
+                            total_target=pending_count,
+                        )
+                        bg.add(camp)
+                        bg.commit()
+                        bg.refresh(camp)
+                        print(f"[BlogResearch] Autopilot: created campaign #{camp.id}, "
+                              f"starting send of {pending_count} emails via "
+                              f"{len(active_senders)} sender(s)...")
+                        # Kick off the send engine (runs in its own thread)
+                        send_engine.start_campaign_send(
+                            campaign_id=camp.id, mode="client",
+                            emails_per_batch=10, delay_seconds=30,
+                            min_delay=15, max_delay=40,
+                            sender_filter=camp.sender_emails,
+                            total_target=pending_count,
+                            autopilot=True,
+                        )
+                    else:
+                        reason = ("no pending emails" if pending_count == 0
+                                  else "no active client senders")
+                        print(f"[BlogResearch] Autopilot skipped: {reason}. "
+                              f"Emails saved to client list — send manually.")
+                except Exception as ap_err:
+                    print(f"[BlogResearch] Autopilot error: {ap_err}")
         except Exception as e:
             import traceback
             print(f"[BlogResearch] Job {job_id} FATAL ERROR: {e}")

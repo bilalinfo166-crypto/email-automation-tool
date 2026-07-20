@@ -1,8 +1,8 @@
 """Warmwire backend API — connect Gmail senders and send test emails."""
-from datetime import date
+from datetime import date, datetime
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 from googleapiclient.discovery import build
 
@@ -249,23 +249,82 @@ def send_test(sender_id: int, data: schemas.TestEmailIn, db: Session = Depends(g
     return {"ok": True, "message_id": result.get("id"), "sent_today": s.sent_today}
 
 
+# ---------------- Open Tracking ----------------
+
+# 1x1 transparent GIF (43 bytes) — returned for every tracking-pixel hit
+_PIXEL_GIF = bytes([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00,
+    0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B
+])
+
+
+@app.get("/track/open")
+def track_open(t: str, db: Session = Depends(get_db)):
+    """Invisible tracking pixel. When a recipient opens the email, their client
+    loads this image, letting us mark the email as 'opened'. Always returns a
+    1x1 transparent GIF so the email renders normally either way."""
+    from .crm_models import OutreachEntry
+    try:
+        entry = db.query(OutreachEntry).filter(OutreachEntry.unsub_token == t).first()
+        # Only upgrade status forward: pending/sent -> opened. Never downgrade
+        # replied/unsubscribed/bounced back to opened.
+        if entry and entry.status in ("sent", "pending"):
+            entry.status = "opened"
+            entry.opened_at = datetime.utcnow()
+            db.add(EventLog(campaign_id=0, contact_id=0, sender_id=0,
+                            type="opened", meta=entry.email))
+            db.commit()
+            print(f"[Track] Opened: {entry.email}")
+        elif entry and entry.status in ("opened", "replied") and not entry.opened_at:
+            # Record first-open time if we somehow missed it
+            entry.opened_at = datetime.utcnow()
+            db.commit()
+    except Exception as e:
+        print(f"[Track] Open tracking error: {e}")
+    # Cache headers off so every open is counted, not served from cache
+    return Response(content=_PIXEL_GIF, media_type="image/gif",
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate",
+                             "Pragma": "no-cache", "Expires": "0"})
+
+
 @app.get("/unsubscribe", response_class=HTMLResponse)
 def unsubscribe(t: str, db: Session = Depends(get_db)):
     """Public one-click unsubscribe. Adds the recipient to the suppression list
-    so they are never emailed again."""
+    so they are never emailed again. Handles BOTH old QueueItem tokens AND
+    new OutreachEntry tokens (from send_engine)."""
+    from .crm_models import OutreachEntry
+
+    # 1) Try old system: QueueItem token (campaign_engine)
     item = db.query(QueueItem).filter(QueueItem.unsub_token == t).first()
-    if not item:
-        return HTMLResponse("<h3>Invalid or expired unsubscribe link.</h3>", status_code=404)
-    contact = db.get(Contact, item.contact_id)
-    if contact:
-        compliance.add_suppression(db, contact.email, reason="unsubscribe")
-        db.add(EventLog(campaign_id=item.campaign_id, contact_id=contact.id,
-                        sender_id=item.sender_id, type="unsubscribed"))
+    if item:
+        contact = db.get(Contact, item.contact_id)
+        if contact:
+            compliance.add_suppression(db, contact.email, reason="unsubscribe")
+            db.add(EventLog(campaign_id=item.campaign_id, contact_id=contact.id,
+                            sender_id=item.sender_id, type="unsubscribed"))
+            db.commit()
+        return HTMLResponse(
+            "<h2>You have been unsubscribed.</h2>"
+            "<p>You will not receive any further emails from us. Sorry for the intrusion.</p>"
+        )
+
+    # 2) Try new system: OutreachEntry token (send_engine)
+    entry = db.query(OutreachEntry).filter(OutreachEntry.unsub_token == t).first()
+    if entry:
+        compliance.add_suppression(db, entry.email, reason="unsubscribe")
+        entry.status = "unsubscribed"
+        db.add(EventLog(campaign_id=0, contact_id=0,
+                        sender_id=0, type="unsubscribed",
+                        meta=entry.email))
         db.commit()
-    return HTMLResponse(
-        "<h2>You have been unsubscribed.</h2>"
-        "<p>You will not receive any further emails from us. Sorry for the intrusion.</p>"
-    )
+        return HTMLResponse(
+            "<h2>You have been unsubscribed.</h2>"
+            "<p>You will not receive any further emails from us. Sorry for the intrusion.</p>"
+        )
+
+    return HTMLResponse("<h3>Invalid or expired unsubscribe link.</h3>", status_code=404)
 
 
 @app.get("/")

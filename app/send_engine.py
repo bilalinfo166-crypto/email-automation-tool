@@ -10,6 +10,7 @@ Features:
 """
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from .database import SessionLocal, Sender
 from .crm_models import OutreachEntry, EventLog, Campaign
@@ -22,12 +23,17 @@ _stop_flags = {}
 
 
 def _get_senders(db, mode):
-    """Get all active senders for this mode, ordered by ID."""
-    return db.query(Sender).filter(Sender.mode == mode, Sender.warmup == True).order_by(Sender.id).all()
+    """Get all active senders for this mode, ordered by ID.
+    Excludes senders that failed auth or are still verifying."""
+    return db.query(Sender).filter(
+        Sender.mode == mode,
+        Sender.status.notin_(["auth_failed", "verifying"])
+    ).order_by(Sender.id).all()
 
 
-def _build_variables(entry, sender):
-    """Build template variables. Body uses clean name (Today), subject uses full domain (Today.com)."""
+def _build_variables(entry, sender, unsub_token=""):
+    """Build template variables. Body uses clean name (Today), subject uses full domain (Today.com).
+    unsub_token = unique token for this email's unsubscribe link."""
     email = entry.email
     domain = (entry.domain or email.split("@")[-1]).replace("www.", "").lower()
 
@@ -44,6 +50,9 @@ def _build_variables(entry, sender):
     raw = parts[0].replace("-", " ").replace("_", " ")
     company = raw.title()
 
+    # Unsubscribe URL: token-based (works with /unsubscribe?t=TOKEN endpoint)
+    unsub_url = f"http://127.0.0.1:8000/unsubscribe?t={unsub_token}" if unsub_token else f"http://127.0.0.1:8000/unsubscribe?t=none"
+
     return {
         # company_name in body = clean name only ("Today")
         "company_name": company,
@@ -52,7 +61,7 @@ def _build_variables(entry, sender):
         "sender_name": (sender.name or sender.email.split("@")[0]).split()[0].title(),
         "your_company": "Uplyncio",
         "your_website": "uplyncio.com",
-        "unsubscribe_url": f"http://127.0.0.1:8000/unsubscribe?email={email}",
+        "unsubscribe_url": unsub_url,
     }
 
 
@@ -177,17 +186,32 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                         if stop_flag["stop"]:
                             break
 
+                # Generate unique unsubscribe token for this email
+                token = uuid.uuid4().hex
+                entry.unsub_token = token
+
                 # Round-robin template (vendor mode uses vendor templates)
                 if mode == "vendor":
                     from .vendor_templates import get_vendor_template, render_vendor_template
                     template = get_vendor_template(template_idx)
-                    variables = _build_variables(entry, sender)
+                    variables = _build_variables(entry, sender, unsub_token=token)
                     rendered = render_vendor_template(template, variables)
                 else:
                     template = get_template(template_idx)
-                    variables = _build_variables(entry, sender)
+                    variables = _build_variables(entry, sender, unsub_token=token)
                     rendered = render_template(template, variables)
                 template_idx += 1
+
+                # OPEN TRACKING: inject an invisible 1x1 pixel at the end of the
+                # email body. When the recipient opens the email, their client
+                # loads this image, which hits /track/open?t=TOKEN and marks the
+                # email as "opened". Uses the same token as unsubscribe.
+                tracking_pixel = (
+                    f'<img src="http://127.0.0.1:8000/track/open?t={token}" '
+                    f'width="1" height="1" alt="" '
+                    f'style="display:none;width:1px;height:1px" />'
+                )
+                rendered["body_html"] = rendered["body_html"] + tracking_pixel
 
                 # VERIFY email before sending (MX check) — reduces bounces.
                 # Only skip if the address is CLEARLY invalid (bad syntax/no MX).
