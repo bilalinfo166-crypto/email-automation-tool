@@ -1,5 +1,6 @@
 """CRM API: domains, compliant scraping, contacts, suppression, campaigns
 (with the review->approve compliance gate), queue, sending, and analytics."""
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
