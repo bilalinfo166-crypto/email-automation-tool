@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .database import get_db
+from .database import get_db, SessionLocal
 from .crm_models import Domain, Contact, Suppression, Campaign, QueueItem, CompanyProfile
 from . import compliance, scraper, campaign_engine, replies, warmup
 
@@ -858,8 +858,9 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
     _blog_stop[job_id] = {"stop": False}
 
     def _run():
-        bg = SessionLocal()
+        bg = None
         try:
+            bg = SessionLocal()
             j = bg.get(BlogResearchJob, job_id)
             j.status = "running"; j.done_sites = 0; j.links_found = 0
             j.articles_found = 0; j.phase = "articles"
@@ -897,11 +898,15 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                     bg.commit()
 
                 try:
+                    print(f"[BlogResearch] Researching {site}...")
                     blog_research.research_site(site, j.time_range, j.max_articles,
                                                 workers=10, on_article=on_article,
                                                 on_link=on_link)
+                    print(f"[BlogResearch] Done {site}")
                 except Exception as e:
-                    print(f"[BlogResearch] {site}: {e}")
+                    import traceback
+                    print(f"[BlogResearch] {site} ERROR: {e}")
+                    traceback.print_exc()
 
                 jj = bg.get(BlogResearchJob, job_id)
                 jj.done_sites = (jj.done_sites or 0) + 1
@@ -912,11 +917,24 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
             j.links_found = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id).count()
             bg.commit()
-            bg.commit()
+            print(f"[BlogResearch] Job {job_id} complete: {j.links_found} links")
         except Exception as e:
-            print(f"[BlogResearch] Job error: {e}")
+            import traceback
+            print(f"[BlogResearch] Job {job_id} FATAL ERROR: {e}")
+            traceback.print_exc()
+            # Mark job as error so it doesn't stay stuck on "pending"
+            try:
+                if bg is None:
+                    bg = SessionLocal()
+                jj = bg.get(BlogResearchJob, job_id)
+                if jj:
+                    jj.status = "error"
+                    bg.commit()
+            except Exception:
+                pass
         finally:
-            bg.close()
+            if bg is not None:
+                bg.close()
             _blog_threads.pop(job_id, None)
             _blog_stop.pop(job_id, None)
 
