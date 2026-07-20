@@ -57,9 +57,20 @@ def _build_variables(entry, sender):
 
 
 def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
-                        delay_seconds: int = 60, scheduled_time: str = None,
+                        delay_seconds: int = 30, scheduled_time: str = None,
                         sender_filter: str = None, total_target: int = 0,
-                        autopilot: bool = False):
+                        autopilot: bool = False, min_delay: int = 0, max_delay: int = 0):
+    """delay_seconds is the base gap. If min_delay/max_delay given, each email
+    waits a RANDOM time in that range (more natural, no fixed pattern)."""
+    import random
+    # If explicit range not given, build a natural range around delay_seconds:
+    # e.g. delay_seconds=30 -> random 15-40ish. Range is [delay*0.5, delay*1.35].
+    if min_delay <= 0:
+        min_delay = max(10, int(delay_seconds * 0.5))
+    if max_delay <= 0:
+        max_delay = int(delay_seconds * 1.35)
+    if max_delay < min_delay:
+        max_delay = min_delay + 10
     """Start sending. sender_filter = comma-separated emails (only use these senders)."""
     if campaign_id in _send_threads:
         return {"error": "Campaign already sending"}
@@ -119,6 +130,11 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             template_idx = 0
             stop_flag = {"stop": False}
             _stop_flags[campaign_id] = stop_flag
+            # Track when each sender last sent, so the gap applies PER SENDER.
+            # Round-robin: sender1, sender2, sender3, sender4, then sender1 again —
+            # and sender1's 2nd email waits delay_seconds after sender1's 1st (not
+            # after sender4's). Different senders send back-to-back with no wait.
+            last_sent_at = {}
 
             for i, entry in enumerate(pending):
                 # Check if manually stopped (fast in-memory flag, not DB)
@@ -142,6 +158,24 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                         s.daily_cap = (s.sent_today or 0) + len(pending) + 10
                     db.commit()
                     sender = senders[i % len(senders)]
+
+                # PER-SENDER gap: if THIS sender sent recently, wait out the remainder
+                # of its personal gap. Gap is RANDOM in [min_delay, max_delay] each time
+                # so there's no fixed pattern (looks natural to Gmail). Other senders
+                # are unaffected and send in parallel.
+                prev = last_sent_at.get(sender.email)
+                if prev is not None:
+                    this_gap = random.randint(min_delay, max_delay)
+                    elapsed = time.time() - prev
+                    remaining = this_gap - elapsed
+                    if remaining > 0:
+                        print(f"[SendEngine] {sender.email} waiting {remaining:.0f}s (random {this_gap}s gap)...")
+                        waited = 0
+                        while waited < remaining and not stop_flag["stop"]:
+                            time.sleep(min(1, remaining - waited))
+                            waited += 1
+                        if stop_flag["stop"]:
+                            break
 
                 # Round-robin template (vendor mode uses vendor templates)
                 if mode == "vendor":
@@ -195,6 +229,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                                        type="sent", contact_id=0))
                         db.commit()
                         sent_count += 1
+                        last_sent_at[sender.email] = time.time()  # record for per-sender gap
                         print(f"[SendEngine] Sent #{sent_count}: {entry.email} via {sender.email}")
                     else:
                         entry.status = "failed"
@@ -207,10 +242,8 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                     db.commit()
                     print(f"[SendEngine] Failed: {entry.email} — {e}")
 
-                # Rate control: pause after each batch
-                if sent_count > 0 and sent_count % emails_per_batch == 0:
-                    print(f"[SendEngine] Batch of {emails_per_batch} done. Waiting {delay_seconds}s...")
-                    time.sleep(delay_seconds)
+                # (Gap is handled per-sender at the top of the loop — no global wait here,
+                # so different senders send back-to-back while each sender paces itself.)
 
             # Campaign complete
             campaign.status = "completed"

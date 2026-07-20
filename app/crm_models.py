@@ -167,3 +167,33 @@ class OutreachEntry(Base):
     subject: Mapped[str] = mapped_column(String, default="")
     days_since_sent: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BlogResearchJob(Base):
+    """A blog research job — user adds sites, tool finds external links."""
+    __tablename__ = "blog_research_jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, default="")
+    sites: Mapped[str] = mapped_column(Text, default="")        # comma/newline separated
+    time_range: Mapped[str] = mapped_column(String, default="1m")
+    max_articles: Mapped[int] = mapped_column(Integer, default=30)
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending/running/done/stopped
+    total_sites: Mapped[int] = mapped_column(Integer, default=0)
+    done_sites: Mapped[int] = mapped_column(Integer, default=0)
+    links_found: Mapped[int] = mapped_column(Integer, default=0)
+    autopilot: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BlogResearchLink(Base):
+    """One discovered external link — a potential client prospect."""
+    __tablename__ = "blog_research_links"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(Integer, default=0)
+    source_site: Mapped[str] = mapped_column(String, default="")     # blog we researched
+    source_article: Mapped[str] = mapped_column(Text, default="")    # article the link was in
+    target_domain: Mapped[str] = mapped_column(String, default="")   # the prospect's domain
+    target_url: Mapped[str] = mapped_column(Text, default="")        # full link
+    email: Mapped[str] = mapped_column(String, default="")           # scraped email (later)
+    email_status: Mapped[str] = mapped_column(String, default="pending")  # pending/found/no_email
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

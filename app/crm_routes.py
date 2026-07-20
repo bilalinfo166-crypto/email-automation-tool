@@ -728,7 +728,8 @@ def create_campaign(
     name: str, mode: str = "vendor",
     sender_emails: str = "",       # comma-separated: "a@x.com,b@y.com"
     emails_per_batch: int = 10,
-    delay_seconds: int = 60,
+    delay_seconds: int = 30,
+    min_delay: int = 0, max_delay: int = 0,   # random gap range
     total_target: int = 0,          # 0 = all pending
     scheduled_time: str = "",       # ISO datetime, empty = manual
     autopilot: bool = False,
@@ -741,16 +742,23 @@ def create_campaign(
     if pending == 0:
         return {"error": "No pending emails in send list."}
     target = total_target if total_target > 0 else pending
+    # Random gap range (default: build from delay_seconds)
+    if min_delay <= 0:
+        min_delay = max(10, int(delay_seconds * 0.5))
+    if max_delay <= 0:
+        max_delay = int(delay_seconds * 1.35)
 
     camp = Campaign(
         name=name, mode=mode, status="scheduled" if scheduled_time else "ready",
         sender_emails=sender_emails, emails_per_batch=emails_per_batch,
-        delay_seconds=delay_seconds, scheduled_time=scheduled_time,
+        delay_seconds=delay_seconds, min_delay_sec=min_delay, max_delay_sec=max_delay,
+        scheduled_time=scheduled_time,
         autopilot=autopilot, total_target=target,
     )
     db.add(camp); db.commit(); db.refresh(camp)
     return {"campaign_id": camp.id, "name": camp.name, "target": target,
-            "status": camp.status, "autopilot": autopilot}
+            "status": camp.status, "autopilot": autopilot,
+            "gap": f"{min_delay}-{max_delay}s random"}
 
 
 @router.get("/campaign/list")
@@ -786,6 +794,8 @@ def start_campaign(campaign_id: int, db: Session = Depends(get_db)):
         campaign_id=campaign_id, mode=camp.mode,
         emails_per_batch=camp.emails_per_batch,
         delay_seconds=camp.delay_seconds,
+        min_delay=camp.min_delay_sec or 0,
+        max_delay=camp.max_delay_sec or 0,
         scheduled_time=camp.scheduled_time or None,
         sender_filter=camp.sender_emails or None,
         total_target=camp.total_target,
@@ -806,3 +816,187 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
     if camp:
         db.delete(camp); db.commit()
     return {"deleted": campaign_id}
+
+
+# ============ BLOG RESEARCH (client-hunting via external links) ============
+
+_blog_threads = {}
+_blog_stop = {}
+
+@router.post("/blog/create")
+def create_blog_job(name: str = "", sites: str = "", time_range: str = "1m",
+                    max_articles: int = 30, autopilot: bool = False,
+                    db: Session = Depends(get_db)):
+    """Create a blog research job. sites = comma/newline separated domains."""
+    from .crm_models import BlogResearchJob
+    site_list = [s.strip() for s in re.split(r"[,\n]", sites) if s.strip()]
+    if not site_list:
+        return {"error": "Add at least one blog site."}
+    job = BlogResearchJob(
+        name=name or f"Research {datetime.utcnow().strftime('%b %d')}",
+        sites=",".join(site_list), time_range=time_range,
+        max_articles=max_articles, autopilot=autopilot,
+        total_sites=len(site_list), status="pending",
+    )
+    db.add(job); db.commit(); db.refresh(job)
+    return {"job_id": job.id, "name": job.name, "total_sites": len(site_list),
+            "time_range": time_range}
+
+
+@router.post("/blog/{job_id}/start")
+def start_blog_job(job_id: int, db: Session = Depends(get_db)):
+    """Start researching — find external links across all sites."""
+    from .crm_models import BlogResearchJob, BlogResearchLink
+    from . import blog_research
+    job = db.get(BlogResearchJob, job_id)
+    if not job:
+        return {"error": "Job not found"}
+    if job_id in _blog_threads:
+        return {"error": "Already running"}
+
+    _blog_stop[job_id] = {"stop": False}
+
+    def _run():
+        bg = SessionLocal()
+        try:
+            j = bg.get(BlogResearchJob, job_id)
+            j.status = "running"; j.done_sites = 0; j.links_found = 0
+            bg.commit()
+            sites = [s for s in j.sites.split(",") if s]
+
+            def on_progress(site, count):
+                jj = bg.get(BlogResearchJob, job_id)
+                if jj:
+                    jj.done_sites = (jj.done_sites or 0) + 1
+                    bg.commit()
+
+            # Research each site, save links as we go
+            for site in sites:
+                if _blog_stop.get(job_id, {}).get("stop"):
+                    break
+                try:
+                    results = blog_research.research_site(site, j.time_range, j.max_articles)
+                    for r in results:
+                        # Global dedupe: skip if this target domain already saved for this job
+                        exists = bg.query(BlogResearchLink).filter(
+                            BlogResearchLink.job_id == job_id,
+                            BlogResearchLink.target_domain == r["target_domain"]).first()
+                        if exists:
+                            continue
+                        link = BlogResearchLink(
+                            job_id=job_id, source_site=r["source_site"],
+                            source_article=r["source_article"],
+                            target_domain=r["target_domain"], target_url=r["target_url"],
+                        )
+                        bg.add(link)
+                    bg.commit()
+                except Exception as e:
+                    print(f"[BlogResearch] {site}: {e}")
+                jj = bg.get(BlogResearchJob, job_id)
+                jj.done_sites = (jj.done_sites or 0) + 1
+                jj.links_found = bg.query(BlogResearchLink).filter(
+                    BlogResearchLink.job_id == job_id).count()
+                bg.commit()
+
+            j = bg.get(BlogResearchJob, job_id)
+            j.status = "done"
+            j.links_found = bg.query(BlogResearchLink).filter(
+                BlogResearchLink.job_id == job_id).count()
+            bg.commit()
+        except Exception as e:
+            print(f"[BlogResearch] Job error: {e}")
+        finally:
+            bg.close()
+            _blog_threads.pop(job_id, None)
+            _blog_stop.pop(job_id, None)
+
+    import threading
+    t = threading.Thread(target=_run, daemon=True)
+    _blog_threads[job_id] = t
+    t.start()
+    return {"status": "started", "job_id": job_id}
+
+
+@router.post("/blog/{job_id}/stop")
+def stop_blog_job(job_id: int):
+    if job_id in _blog_stop:
+        _blog_stop[job_id]["stop"] = True
+    return {"status": "stopping"}
+
+
+@router.get("/blog/jobs")
+def list_blog_jobs(db: Session = Depends(get_db)):
+    from .crm_models import BlogResearchJob
+    jobs = db.query(BlogResearchJob).order_by(BlogResearchJob.id.desc()).all()
+    return [{"id": j.id, "name": j.name, "status": j.status,
+             "total_sites": j.total_sites, "done_sites": j.done_sites,
+             "links_found": j.links_found, "time_range": j.time_range,
+             "autopilot": j.autopilot,
+             "created_at": j.created_at.isoformat() if j.created_at else ""} for j in jobs]
+
+
+@router.get("/blog/{job_id}/links")
+def blog_links(job_id: int, page: int = 1, limit: int = 100, db: Session = Depends(get_db)):
+    from .crm_models import BlogResearchLink
+    q = db.query(BlogResearchLink).filter(BlogResearchLink.job_id == job_id)
+    total = q.count()
+    links = q.order_by(BlogResearchLink.id.desc()).offset((page-1)*limit).limit(limit).all()
+    return {"total": total, "page": page,
+            "links": [{"id": l.id, "source_site": l.source_site,
+                       "source_article": l.source_article,
+                       "target_domain": l.target_domain, "target_url": l.target_url,
+                       "email": l.email, "email_status": l.email_status} for l in links]}
+
+
+@router.post("/blog/{job_id}/scrape-emails")
+def blog_scrape_emails(job_id: int, db: Session = Depends(get_db)):
+    """Scrape emails from all discovered link domains (like the main scraper)."""
+    from .crm_models import BlogResearchLink, OutreachEntry
+    from . import scraper
+    links = db.query(BlogResearchLink).filter(
+        BlogResearchLink.job_id == job_id,
+        BlogResearchLink.email_status == "pending").all()
+
+    def _run():
+        bg = SessionLocal()
+        try:
+            for link in bg.query(BlogResearchLink).filter(
+                    BlogResearchLink.job_id == job_id,
+                    BlogResearchLink.email_status == "pending").all():
+                try:
+                    result = scraper.extract_domain(link.target_domain, mode="client")
+                    contacts = result.get("contacts", [])
+                    if contacts:
+                        email = contacts[0].get("email", "")
+                        link.email = email
+                        link.email_status = "found"
+                        # Add to client send list
+                        existing = bg.query(OutreachEntry).filter(
+                            OutreachEntry.email == email).first()
+                        if not existing:
+                            bg.add(OutreachEntry(
+                                mode="client", email=email, domain=link.target_domain,
+                                email_type="blog_research", confidence="medium",
+                                source_url=link.target_url, status="pending"))
+                    else:
+                        link.email_status = "no_email"
+                    bg.commit()
+                except Exception as e:
+                    link.email_status = "no_email"
+                    bg.commit()
+        finally:
+            bg.close()
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "scraping", "to_scrape": len(links)}
+
+
+@router.delete("/blog/{job_id}")
+def delete_blog_job(job_id: int, db: Session = Depends(get_db)):
+    from .crm_models import BlogResearchJob, BlogResearchLink
+    job = db.get(BlogResearchJob, job_id)
+    if job:
+        db.query(BlogResearchLink).filter(BlogResearchLink.job_id == job_id).delete()
+        db.delete(job); db.commit()
+    return {"deleted": job_id}
