@@ -64,6 +64,21 @@ SKIP_DOMAINS = {
     "yahoo.com", "bing.com", "paypal.com", "wa.me", "t.me", "whatsapp.com",
     "archive.org", "web.archive.org", "imdb.com", "yelp.com", "tripadvisor.com",
     "booking.com", "airbnb.com", "uber.com", "netflix.com", "cloudfront.net",
+    "amazonaws.com", "herokuapp.com", "azurewebsites.net", "vercel.app",
+    "netlify.app", "githubusercontent.com", "wp.com", "gstatic.com",
+}
+
+# Brand names to skip across ALL TLDs. amazon.co.uk, amazon.de, amazon.in,
+# google.co.uk etc. all get skipped by matching the first label of the domain.
+# This catches country variants that a plain domain list would miss.
+SKIP_BRANDS = {
+    "amazon", "google", "youtube", "facebook", "instagram", "linkedin",
+    "twitter", "microsoft", "apple", "ebay", "walmart", "aliexpress",
+    "alibaba", "yahoo", "bing", "paypal", "netflix", "spotify", "wikipedia",
+    "booking", "tripadvisor", "airbnb", "uber", "pinterest", "reddit",
+    "wordpress", "shopify", "etsy", "bbc", "cnn", "forbes", "reuters",
+    "bloomberg", "theguardian", "nytimes", "wikihow", "indeed", "glassdoor",
+    "flipkart", "target", "bestbuy", "wikimedia", "wiktionary", "quora",
 }
 
 TIME_RANGES = {
@@ -76,6 +91,14 @@ TIME_RANGES = {
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
 
+# Shared session with a big connection pool — reusing connections is dramatically
+# faster than opening a new TCP+TLS handshake for every single article fetch.
+_session = requests.Session()
+_session.headers.update(HEADERS)
+_adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=1)
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
+
 
 def _root(url):
     try:
@@ -86,12 +109,22 @@ def _root(url):
 
 def _is_skip(domain):
     d = domain.lower().replace("www.", "")
-    return any(d == s or d.endswith("." + s) for s in SKIP_DOMAINS)
+    # 1) Exact domain or subdomain match against SKIP_DOMAINS
+    if any(d == s or d.endswith("." + s) for s in SKIP_DOMAINS):
+        return True
+    # 2) Brand-name match across ALL TLDs (amazon.co.uk, amazon.de, google.in...)
+    #    Take the first label of the registrable domain and compare to SKIP_BRANDS.
+    parts = d.split(".")
+    if parts:
+        first = parts[0]
+        if first in SKIP_BRANDS:
+            return True
+    return False
 
 
-def _fetch(url, timeout=10):
+def _fetch(url, timeout=8):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        r = _session.get(url, timeout=timeout, allow_redirects=True)
         if r.status_code == 200:
             return r.text
     except Exception:
@@ -189,24 +222,56 @@ def _find_articles(site, max_articles=30):
 
 
 def _extract_external_links(article_url):
-    """Get external links from one article. Returns list of (target_domain, target_url)."""
+    """Get ONLY organic editorial links from the article body.
+
+    Excludes: ads, sponsored/promoted widgets (Taboola/Outbrain/etc), affiliate
+    links, related-post widgets, share buttons, author bios, CTAs, image-only
+    links, and rel=sponsored/nofollow links. Keeps only real in-content anchor
+    links that a writer placed inside the article text."""
     root = _root(article_url)
     html = _fetch(article_url)
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
 
-    # Remove nav, header, footer, sidebar, menus — links there aren't guest-post links
-    for tag in soup.find_all(["nav", "header", "footer", "aside"]):
-        tag.decompose()
-    for tag in soup.find_all(class_=re.compile(r"(menu|nav|sidebar|footer|header|widget|related|share|social|comment)", re.I)):
+    # 1) Strip structural chrome — nav/header/footer/sidebar aren't article links
+    for tag in soup.find_all(["nav", "header", "footer", "aside", "form",
+                              "figure", "figcaption", "button"]):
         tag.decompose()
 
-    # Prefer the article content container; fall back to whole cleaned page
+    # 2) Strip ad / sponsored / widget / related / promo containers by class or id.
+    #    This is what removes "recommended for you", ad slots, affiliate boxes etc.
+    JUNK_CONTAINER = re.compile(
+        r"(menu|nav|sidebar|footer|header|widget|related|share|social|comment|"
+        r"\bad\b|ads|advert|sponsor|promot|promo|banner|affiliate|partner|"
+        r"taboola|outbrain|revcontent|mgid|zergnet|newsletter|subscribe|"
+        r"popup|modal|cta|call-to-action|recommend|trending|popular|"
+        r"author-bio|author-box|about-author|bio-box|post-meta|entry-meta|"
+        r"tags|tag-list|breadcrumb|pagination|more-from|read-more|read-next)",
+        re.I)
+    for tag in soup.find_all(attrs={"class": JUNK_CONTAINER}):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"id": JUNK_CONTAINER}):
+        tag.decompose()
+    # Also strip anything explicitly marked as an ad region
+    for tag in soup.find_all(attrs={"data-ad": True}):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"role": re.compile(r"(banner|complementary|navigation)", re.I)}):
+        tag.decompose()
+
+    # 3) Pick the real article-content container
     body = (soup.find("article")
-            or soup.find("div", class_=re.compile(r"(entry-content|post-content|article-content|td-post-content|single-content|post-body|content-area)", re.I))
+            or soup.find("div", class_=re.compile(r"(entry-content|post-content|article-content|td-post-content|single-content|post-body|content-area|article-body|story-body)", re.I))
             or soup.find("main")
             or soup)
+
+    # Affiliate / tracking / redirect hosts that are never real prospect sites
+    AFFILIATE_HOSTS = re.compile(
+        r"(amzn\.to|amazon\.|bit\.ly|tinyurl|goo\.gl|ow\.ly|buff\.ly|"
+        r"shareasale|clickbank|cj\.com|commission|impact\.com|awin|rakuten|"
+        r"skimresources|viglink|linksynergy|go\.redirectingat|"
+        r"doubleclick|googlesyndication|googleadservices|adservice|"
+        r"utm_medium=affiliate|/ref=|/aff/|tag=|/go/|/out/|/click)", re.I)
 
     links = []
     seen_domains = set()
@@ -214,9 +279,22 @@ def _extract_external_links(article_url):
         href = a["href"].strip()
         if not href.startswith("http"):
             continue
+
+        # Skip ONLY sponsored links (real paid ads). Do NOT skip nofollow —
+        # guest-post / editorial links are very commonly nofollow, and that
+        # domain owner is exactly the active prospect we want.
+        rel = " ".join(a.get("rel", [])).lower() if a.get("rel") else ""
+        if "sponsored" in rel:
+            continue
+
         target_root = _root(href)
         if not target_root:
             continue
+
+        # Skip affiliate / tracking / redirect links (these aren't real prospects)
+        if AFFILIATE_HOSTS.search(href):
+            continue
+
         # Skip internal links (same root, ignoring www / subdomain)
         bare_root = root.replace("www.", "")
         bare_target = target_root.replace("www.", "")

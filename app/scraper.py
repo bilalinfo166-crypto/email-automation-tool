@@ -15,10 +15,10 @@ from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DOMAIN_BUDGET = 15    # max seconds per domain
+DOMAIN_BUDGET = 14    # max seconds per domain (balance: enough to reach contact pages)
 PAGE_TIMEOUT = 6      # homepage timeout
-PAGE_TIMEOUT_QUICK = 3  # subsequent pages
-MAX_PAGES = 8         # check more pages when email not found
+PAGE_TIMEOUT_QUICK = 4  # subsequent pages
+MAX_PAGES = 8         # check pages when email not found
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 _s = requests.Session()
@@ -55,6 +55,40 @@ JUNK_RE = [re.compile(p, re.I) for p in [
 
 BLOCKED = {"facebook.com","fb.com","linkedin.com","instagram.com","twitter.com",
            "x.com","youtube.com","t.me","wa.me","reddit.com","quora.com","medium.com"}
+
+# Real, valid TLDs — anything ending in something NOT here is junk (you@ease.davis,
+# x@y.can, foo@bar.inte etc. all get rejected). Covers common gTLDs + all ccTLDs.
+VALID_TLDS = {
+    # Common generic
+    "com","org","net","edu","gov","mil","int","info","biz","name","pro","mobi",
+    "co","io","ai","app","dev","tech","online","site","website","store","shop",
+    "blog","news","media","agency","digital","design","studio","group","world",
+    "life","live","today","email","cloud","host","space","xyz","club","fun","vip",
+    "top","icu","cyou","link","click","page","wiki","tv","fm","cc","me","us","uk",
+    "ca","au","de","fr","es","it","nl","se","no","fi","dk","pl","ru","in","pk",
+    "cn","jp","kr","br","mx","ar","za","ng","ke","eg","ae","sa","tr","id","my",
+    "sg","ph","th","vn","hk","tw","nz","ie","pt","gr","cz","ro","hu","at","ch",
+    "be","bg","hr","sk","si","lt","lv","ee","is","lu","mt","cy","ua","by","kz",
+    "il","ir","iq","jo","lb","kw","qa","bh","om","ye","af","bd","lk","np","mm",
+    "kh","la","mn","uz","ge","am","az","co.uk","com.au","co.in","co.za","com.pk",
+    "co.nz","com.br","com.mx","co.jp","or.jp","ne.jp","gov.uk","ac.uk","org.uk",
+    "io","one","ltd","llc","inc","company","enterprises","solutions","services",
+    "consulting","expert","guru","ninja","rocks","cool","zone","network","systems",
+    "finance","money","market","marketing","business","careers","jobs","academy",
+    "education","school","university","institute","center","care","health","fit",
+    "coach","fitness","travel","tours","holiday","estate","realty","homes","house",
+    "law","legal","tax","insurance","bank","capital","fund","trade","global","asia",
+    "eu","africa","io","art","photo","photography","gallery","games","game","play",
+    "software","computer","codes","data","security","hosting","domains","web",
+}
+
+
+def _valid_tld(dom):
+    """True if the domain ends in a real TLD (rejects .davis, .can, .inte etc.)."""
+    # Try two-part TLD first (co.uk, com.pk), then single
+    two = ".".join(dom.rsplit(".", 2)[-2:]) if dom.count(".") >= 2 else ""
+    one = dom.rsplit(".", 1)[-1] if "." in dom else ""
+    return two in VALID_TLDS or one in VALID_TLDS
 
 # Priority pages (most likely to have emails)
 P1_PATHS = ["/contact","/contact-us","/about","/about-us","/privacy","/privacy-policy",
@@ -176,7 +210,8 @@ def _extract(html_text):
     # (email@site.com, me@brand.com, name@corp.com). Placeholder detection relies on
     # domain (example.com etc.) + JUNK_RE instead, so real emails are never wrongly skipped.
     PLACEHOLDER_LOCALS = {"exemple","yourname","youremail","johndoe","janedoe",
-                          "firstname","lastname","dummy","placeholder","undefined"}
+                          "firstname","lastname","dummy","placeholder","undefined",
+                          "email","e-mail","address","user","username"}
     clean=set()
     for e in found:
         e=e.lower().strip(".")
@@ -188,16 +223,29 @@ def _extract(html_text):
         tld=dom.rsplit(".",1)[-1]
         if len(tld)>10 or len(tld)<2: continue  # generous TLD length
         if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,10}$',dom): continue
+        # REAL TLD CHECK — reject fake TLDs like .davis .can .inte .con
+        if not _valid_tld(dom): continue
         # Reject all-numeric domain part (337-216-4423.inte)
         parts=dom.rsplit(".",1)
         if re.match(r'^[\d.\-]+$',parts[0]): continue
         if not re.match(r'^[a-z0-9][a-z0-9._+\-]*$',local): continue
         if re.match(r'^\d+$',local): continue  # numeric-only local
         if local in PLACEHOLDER_LOCALS: continue
+        # Reject single-word "sentence fragment" locals glued to a name-like domain:
+        # e.g. "you@ease.davis" (you + ease + Davis from running text). If the local
+        # is a common English word AND the domain's first label is also a common word,
+        # it's almost certainly text mis-parsed as an email.
+        FRAGMENT_WORDS = {"you","ease","the","and","for","with","your","our","this",
+                          "that","from","have","will","are","was","were","been","being",
+                          "at","to","in","on","of","is","it","we","us","me","my","he",
+                          "she","they","them","please","here","click","read","more","see"}
+        dom_first = parts[0].split(".")[0] if parts else ""
+        if local in FRAGMENT_WORDS and dom_first in FRAGMENT_WORDS: continue
         # Reject placeholder domains
         PLACEHOLDER_DOMS = {"company.com","domain.com","website.com","site.com","yoursite.com",
                            "yourdomain.com","yourcompany.com","business.com","mysite.com",
-                           "mycompany.com","mydomain.com","samplesite.com","testsite.com"}
+                           "mycompany.com","mydomain.com","samplesite.com","testsite.com",
+                           "email.com","name.com","sentry.io","sentry.wixpress.com"}
         if dom in PLACEHOLDER_DOMS: continue
         if any(p.search(e) for p in JUNK_RE): continue
         if _blocked(dom): continue
@@ -504,7 +552,7 @@ def extract_domain(domain, mode="vendor"):
             p=urlparse(u).path.lower()
             if any(k in p for k in ["contact","about","privacy","legal","terms"]) and u not in p1: p1.append(u)
 
-        for pg in p1[:4]:
+        for pg in p1[:6]:
             if done(): break
             h=_get(pg, min(PAGE_TIMEOUT_QUICK, budget()))
             if h:

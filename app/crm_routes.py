@@ -860,11 +860,107 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
 
     def _run():
         bg = None
+        # Scraper pieces imported up-front so on_link can fire email scraping
+        # the instant a link is found (concurrent with the rest of research).
+        from . import scraper as _scraper
+        from .crm_models import OutreachEntry
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        import threading as _threading
+
+        # Thread-safe dedup: parallel workers reserve an email here BEFORE the
+        # DB insert, so two workers scraping the same email can't both add it.
+        _added_emails = set()
+        _added_lock = _threading.Lock()
+
+        def _is_junk_email(email, domain):
+            """Reject clearly-bad emails like info@wikipedia.can."""
+            if not email or "@" not in email:
+                return True
+            local, _, dom = email.partition("@")
+            tld = dom.rsplit(".", 1)[-1] if "." in dom else ""
+            bad_tlds = {"can", "con", "cim", "cm", "co m", "comm", "net work",
+                        "png", "jpg", "gif", "webp", "svg", "css", "js"}
+            if tld.lower() in bad_tlds:
+                return True
+            if len(tld) < 2 or len(tld) > 10:
+                return True
+            return False
+
+        def _scrape_one(link_id):
+            """Scrape emails for one domain, add real ones to client list.
+            Concurrency-safe (own DB session)."""
+            s = SessionLocal()
+            try:
+                lk = s.get(BlogResearchLink, link_id)
+                if not lk or lk.email_status != "pending":
+                    return
+                try:
+                    res = _scraper.extract_domain(lk.target_domain)
+                    contacts = res.get("contacts", [])
+                    email = ""
+                    for c in contacts:
+                        cand = c.get("email", "")
+                        if cand and not _is_junk_email(cand, lk.target_domain):
+                            email = cand
+                            break
+                    if email:
+                        email = email.strip().lower()  # normalize for dedupe
+                        lk.email = email
+                        lk.email_status = "found"
+                        from . import compliance as _compliance
+                        suppressed = _compliance.is_suppressed(s, email)
+
+                        # Thread-safe reservation: only the first worker to see
+                        # this email gets to try inserting it.
+                        reserved = False
+                        with _added_lock:
+                            if email not in _added_emails:
+                                _added_emails.add(email)
+                                reserved = True
+
+                        if suppressed:
+                            print(f"[BlogResearch]   suppressed (skip): {email}")
+                        elif not reserved:
+                            print(f"[BlogResearch]   dup (skip): {email}")
+                        else:
+                            # Double-check DB (covers emails added in earlier jobs)
+                            exists = s.query(OutreachEntry).filter(
+                                OutreachEntry.mode == "client",
+                                OutreachEntry.email == email).first()
+                            if exists:
+                                print(f"[BlogResearch]   dup (skip): {email}")
+                            else:
+                                s.add(OutreachEntry(
+                                    mode="client", email=email, domain=lk.target_domain,
+                                    email_type="blog_research", confidence="medium",
+                                    source_url=lk.target_url, status="pending"))
+                                print(f"[BlogResearch]   + added {lk.target_domain} -> {email}")
+                    else:
+                        lk.email_status = "no_email"
+                        print(f"[BlogResearch]   no email: {lk.target_domain}")
+                    s.commit()
+                    jj = s.get(BlogResearchJob, job_id)
+                    if jj:
+                        jj.emails_found = s.query(BlogResearchLink).filter(
+                            BlogResearchLink.job_id == job_id,
+                            BlogResearchLink.email_status == "found").count()
+                        s.commit()
+                except Exception as ex_inner:
+                    lk.email_status = "no_email"
+                    s.commit()
+                    print(f"[BlogResearch]   ! {lk.target_domain} error: {ex_inner}")
+            finally:
+                s.close()
+
+        # Live email-scrape pool: fires as links come in, parallel to research
+        email_pool = _TPE(max_workers=15)
+        email_futures = []
+
         try:
             bg = SessionLocal()
             j = bg.get(BlogResearchJob, job_id)
             j.status = "running"; j.done_sites = 0; j.links_found = 0
-            j.articles_found = 0; j.phase = "articles"
+            j.articles_found = 0; j.emails_found = 0; j.phase = "articles"
             bg.commit()
             sites = [s for s in j.sites.split(",") if s]
             seen_domains = set()  # global dedupe across all sites
@@ -881,7 +977,7 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                         jj.phase = "articles"
                         bg.commit()
 
-                # Live callback: new link found -> save immediately
+                # Live callback: new link found -> save + fire email scrape NOW
                 def on_link(r):
                     if r["target_domain"] in seen_domains:
                         return
@@ -892,11 +988,17 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                         target_domain=r["target_domain"], target_url=r["target_url"],
                     )
                     bg.add(link)
+                    bg.flush()  # assign link.id without a full commit
+                    new_link_id = link.id
                     jj = bg.get(BlogResearchJob, job_id)
                     if jj:
                         jj.links_found = (jj.links_found or 0) + 1
                         jj.phase = "links"
                     bg.commit()
+                    # AUTO email scrape: fire this domain into the pool immediately
+                    # so email scraping runs concurrently with the research crawl.
+                    if not _blog_stop.get(job_id, {}).get("stop"):
+                        email_futures.append(email_pool.submit(_scrape_one, new_link_id))
 
                 try:
                     print(f"[BlogResearch] Researching {site}...")
@@ -918,83 +1020,29 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
             j.links_found = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id).count()
             bg.commit()
-            print(f"[BlogResearch] Job {job_id} research complete: {j.links_found} links")
+            print(f"[BlogResearch] Job {job_id} research complete: {j.links_found} links. "
+                  f"Waiting for {len(email_futures)} live email scrapes...")
 
-            # AUTO email scrape — no button needed. Uses the SAME scraper the
-            # client dashboard uses (scraper.extract_domain). Runs 10 domains in
-            # parallel, filters junk emails, and adds real ones to the client
-            # send list live so Overview updates as they come in.
-            from . import scraper as _scraper
-            from .crm_models import OutreachEntry
-            from concurrent.futures import ThreadPoolExecutor as _TPE
+            # Wait for all the email scrapes that were fired live during research
+            for f in email_futures:
+                try:
+                    f.result(timeout=60)
+                except Exception:
+                    pass
 
-            pending_links = bg.query(BlogResearchLink).filter(
+            # Safety net: any domain that never got scraped (e.g. fired after a
+            # stop check) gets picked up here.
+            leftover = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id,
                 BlogResearchLink.email_status == "pending").all()
-            link_ids = [l.id for l in pending_links]
-            print(f"[BlogResearch] Auto-scraping emails for {len(link_ids)} domains...")
-
-            def _is_junk_email(email, domain):
-                """Reject clearly-bad emails like info@wikipedia.can."""
-                if not email or "@" not in email:
-                    return True
-                local, _, dom = email.partition("@")
-                # TLD sanity: must end in a real-looking TLD
-                tld = dom.rsplit(".", 1)[-1] if "." in dom else ""
-                bad_tlds = {"can", "con", "cim", "cm", "co m", "comm", "net work",
-                            "png", "jpg", "gif", "webp", "svg", "css", "js"}
-                if tld.lower() in bad_tlds:
-                    return True
-                if len(tld) < 2 or len(tld) > 10:
-                    return True
-                return False
-
-            def _scrape_one(link_id):
-                s = SessionLocal()
-                try:
-                    lk = s.get(BlogResearchLink, link_id)
-                    if not lk:
-                        return
+            leftover_ids = [l.id for l in leftover]
+            if leftover_ids:
+                print(f"[BlogResearch] Scraping {len(leftover_ids)} leftover domains...")
+                for lid in leftover_ids:
                     try:
-                        res = _scraper.extract_domain(lk.target_domain)
-                        contacts = res.get("contacts", [])
-                        email = ""
-                        for c in contacts:
-                            cand = c.get("email", "")
-                            if cand and not _is_junk_email(cand, lk.target_domain):
-                                email = cand
-                                break
-                        if email:
-                            lk.email = email
-                            lk.email_status = "found"
-                            exists = s.query(OutreachEntry).filter(
-                                OutreachEntry.email == email).first()
-                            if not exists:
-                                s.add(OutreachEntry(
-                                    mode="client", email=email, domain=lk.target_domain,
-                                    email_type="blog_research", confidence="medium",
-                                    source_url=lk.target_url, status="pending"))
-                            print(f"[BlogResearch]   ✓ {lk.target_domain} -> {email}")
-                        else:
-                            lk.email_status = "no_email"
-                            print(f"[BlogResearch]   ✗ {lk.target_domain} -> no email")
-                        s.commit()
-                        # Live-update the job's email count as we go
-                        jj = s.get(BlogResearchJob, job_id)
-                        if jj:
-                            jj.emails_found = s.query(BlogResearchLink).filter(
-                                BlogResearchLink.job_id == job_id,
-                                BlogResearchLink.email_status == "found").count()
-                            s.commit()
-                    except Exception as ex_inner:
-                        lk.email_status = "no_email"
-                        s.commit()
-                        print(f"[BlogResearch]   ! {lk.target_domain} error: {ex_inner}")
-                finally:
-                    s.close()
-
-            with _TPE(max_workers=10) as ex:
-                list(ex.map(_scrape_one, link_ids))
+                        email_pool.submit(_scrape_one, lid).result(timeout=60)
+                    except Exception:
+                        pass
 
             # Final count + mark fully done
             jj = bg.get(BlogResearchJob, job_id)
@@ -1077,6 +1125,14 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
             except Exception:
                 pass
         finally:
+            # Shut down the live email-scrape pool (don't leak threads)
+            try:
+                email_pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                try:
+                    email_pool.shutdown(wait=False)
+                except Exception:
+                    pass
             if bg is not None:
                 bg.close()
             _blog_threads.pop(job_id, None)
@@ -1122,8 +1178,54 @@ def blog_links(job_id: int, page: int = 1, limit: int = 100, db: Session = Depen
                        "email": l.email, "email_status": l.email_status} for l in links]}
 
 
-@router.post("/blog/{job_id}/scrape-emails")
-def blog_scrape_emails(job_id: int, db: Session = Depends(get_db)):
+@router.get("/blog/{job_id}/export")
+def blog_export(job_id: int, format: str = "csv", only_emails: bool = False,
+                db: Session = Depends(get_db)):
+    """Export a blog research job's discovered links/prospects as CSV or Excel.
+    only_emails=True -> just the rows where an email was found."""
+    from .crm_models import BlogResearchLink, BlogResearchJob
+    from fastapi.responses import Response
+
+    job = db.get(BlogResearchJob, job_id)
+    jobname = (job.name if job else f"job{job_id}").replace(" ", "_").replace("/", "-")
+
+    q = db.query(BlogResearchLink).filter(BlogResearchLink.job_id == job_id)
+    if only_emails:
+        q = q.filter(BlogResearchLink.email_status == "found")
+    links = q.order_by(BlogResearchLink.id).all()
+
+    headers_row = ["From Site", "Source Article", "Target Domain", "Target URL",
+                   "Email", "Email Status"]
+
+    def row_of(l):
+        return [l.source_site or "", l.source_article or "", l.target_domain or "",
+                l.target_url or "", l.email or "", l.email_status or ""]
+
+    if format == "xlsx":
+        from openpyxl import Workbook
+        from io import BytesIO
+        wb = Workbook(); ws = wb.active; ws.title = "Prospects"
+        ws.append(headers_row)
+        for l in links:
+            ws.append(row_of(l))
+        buf = BytesIO(); wb.save(buf); buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=blog_{jobname}.xlsx"})
+
+    # CSV
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers_row)
+    for l in links:
+        w.writerow(row_of(l))
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename=blog_{jobname}.csv"})
+
+
+
     """Scrape emails from all discovered link domains (like the main scraper)."""
     from .crm_models import BlogResearchLink, OutreachEntry
     from . import scraper
