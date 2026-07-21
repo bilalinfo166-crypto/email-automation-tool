@@ -200,4 +200,5 @@ class BlogResearchLink(Base):
     target_url: Mapped[str] = mapped_column(Text, default="")        # full link
     email: Mapped[str] = mapped_column(String, default="")           # scraped email (later)
     email_status: Mapped[str] = mapped_column(String, default="pending")  # pending/found/no_email
+    published_date: Mapped[str] = mapped_column(String, default="")   # article publish date (YYYY-MM-DD)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

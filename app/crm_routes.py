@@ -281,8 +281,22 @@ def warmup_run(max_sends: int = 10, db: Session = Depends(get_db)):
 def compliance_dashboard(mode: str = "", db: Session = Depends(get_db)):
     from .crm_models import EventLog, ScraperJob, ScraperResult
     from .database import Sender
+    try:
+        return _compliance_dashboard_impl(mode, db)
+    except Exception as e:
+        import traceback
+        print(f"[dashboard] ERROR for mode={mode}: {e}")
+        traceback.print_exc()
+        # Minimal safe payload so the UI still renders
+        return {"mode": mode or "all", "company_profile_completed": False,
+                "statuses": {"Sent":0,"Opened":0,"Replied":0,"Failed":0,
+                             "Unsubscribed":0,"Not Interested":0},
+                "senders": [], "error": str(e)}
 
-    # mode-aware campaign totals
+
+def _compliance_dashboard_impl(mode, db):
+    from .crm_models import EventLog, ScraperJob, ScraperResult
+    from .database import Sender
     cq = db.query(Campaign)
     if mode:
         cq = cq.filter(Campaign.mode == mode)
@@ -435,19 +449,28 @@ def list_outreach(mode: str = "vendor", page: int = 1, limit: int = 100, status:
 
 @router.get("/outreach/stats")
 def outreach_stats(mode: str = "vendor", db: Session = Depends(get_db)):
-    """Live stats for the outreach sheet."""
+    """Live stats for the outreach sheet. Hardened so a single bad row can
+    never 500 the whole endpoint."""
     from .crm_models import OutreachEntry
-    q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
-    total = q.count()
-    sent = q.filter(OutreachEntry.status.in_(["sent","opened","replied"])).count()
-    opened = q.filter(OutreachEntry.status.in_(["opened","replied"])).count()
-    replied = q.filter(OutreachEntry.status == "replied").count()
-    bounced = q.filter(OutreachEntry.status == "bounced").count()
-    pending = q.filter(OutreachEntry.status == "pending").count()
-    return {"total":total,"pending":pending,"sent":sent,"opened":opened,
-            "replied":replied,"bounced":bounced,
-            "open_rate":round(opened/max(1,sent)*100,1),
-            "reply_rate":round(replied/max(1,sent)*100,1)}
+    try:
+        q = db.query(OutreachEntry).filter(OutreachEntry.mode == mode)
+        total = q.count()
+        sent = q.filter(OutreachEntry.status.in_(["sent","opened","replied"])).count()
+        opened = q.filter(OutreachEntry.status.in_(["opened","replied"])).count()
+        replied = q.filter(OutreachEntry.status == "replied").count()
+        bounced = q.filter(OutreachEntry.status == "bounced").count()
+        pending = q.filter(OutreachEntry.status == "pending").count()
+        return {"total":total,"pending":pending,"sent":sent,"opened":opened,
+                "replied":replied,"bounced":bounced,
+                "open_rate":round(opened/max(1,sent)*100,1),
+                "reply_rate":round(replied/max(1,sent)*100,1)}
+    except Exception as e:
+        import traceback
+        print(f"[outreach_stats] ERROR for mode={mode}: {e}")
+        traceback.print_exc()
+        # Return zeros instead of 500 so the dashboard still renders
+        return {"total":0,"pending":0,"sent":0,"opened":0,"replied":0,
+                "bounced":0,"open_rate":0.0,"reply_rate":0.0,"error":str(e)}
 
 
 @router.get("/outreach/export")
@@ -988,6 +1011,7 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                         job_id=job_id, source_site=r["source_site"],
                         source_article=r["source_article"],
                         target_domain=r["target_domain"], target_url=r["target_url"],
+                        published_date=r.get("published_date", ""),
                     )
                     bg.add(link)
                     bg.flush()  # assign link.id without a full commit
@@ -1004,9 +1028,10 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
 
                 try:
                     print(f"[BlogResearch] Researching {site}...")
-                    blog_research.research_site(site, j.time_range, j.max_articles,
-                                                workers=10, on_article=on_article,
-                                                on_link=on_link)
+                    blog_research.research_site(
+                        site, j.time_range, j.max_articles,
+                        workers=10, on_article=on_article, on_link=on_link,
+                        should_stop=lambda: _blog_stop.get(job_id, {}).get("stop", False))
                     print(f"[BlogResearch] Done {site}")
                 except Exception as e:
                     import traceback
@@ -1153,10 +1178,19 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/blog/{job_id}/stop")
-def stop_blog_job(job_id: int):
+def stop_blog_job(job_id: int, db: Session = Depends(get_db)):
+    """Immediately stop a running blog research job."""
+    from .crm_models import BlogResearchJob
+    # 1) Set the stop flag so the background thread halts at its next check
     if job_id in _blog_stop:
         _blog_stop[job_id]["stop"] = True
-    return {"status": "stopping"}
+    # 2) Immediately reflect the stop in the DB so the UI updates on next poll
+    job = db.get(BlogResearchJob, job_id)
+    if job and job.status == "running":
+        job.status = "stopped"
+        job.phase = ""
+        db.commit()
+    return {"status": "stopped"}
 
 
 @router.get("/blog/jobs")
@@ -1182,7 +1216,8 @@ def blog_links(job_id: int, page: int = 1, limit: int = 100, db: Session = Depen
             "links": [{"id": l.id, "source_site": l.source_site,
                        "source_article": l.source_article,
                        "target_domain": l.target_domain, "target_url": l.target_url,
-                       "email": l.email, "email_status": l.email_status} for l in links]}
+                       "email": l.email, "email_status": l.email_status,
+                       "published_date": getattr(l, "published_date", "")} for l in links]}
 
 
 @router.get("/blog/{job_id}/export")
@@ -1201,11 +1236,12 @@ def blog_export(job_id: int, format: str = "csv", only_emails: bool = False,
         q = q.filter(BlogResearchLink.email_status == "found")
     links = q.order_by(BlogResearchLink.id).all()
 
-    headers_row = ["From Site", "Source Article", "Target Domain", "Target URL",
-                   "Email", "Email Status"]
+    headers_row = ["From Site", "Published Date", "Source Article", "Target Domain",
+                   "Target URL", "Email", "Email Status"]
 
     def row_of(l):
-        return [l.source_site or "", l.source_article or "", l.target_domain or "",
+        return [l.source_site or "", getattr(l, "published_date", "") or "",
+                l.source_article or "", l.target_domain or "",
                 l.target_url or "", l.email or "", l.email_status or ""]
 
     if format == "xlsx":
@@ -1285,24 +1321,105 @@ def delete_blog_job(job_id: int, db: Session = Depends(get_db)):
     return {"deleted": job_id}
 
 
+@router.post("/blog/migrate-from-client")
+def blog_migrate_from_client(db: Session = Depends(get_db)):
+    """One-time migration: move OLD blog-research emails that were saved under
+    mode='client' (before blog got its own list) into mode='blog'. Skips any
+    email that already exists in the blog list (no duplicates)."""
+    from .crm_models import OutreachEntry
+
+    # All client-mode entries that came from blog research
+    old = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == "client",
+        OutreachEntry.email_type == "blog_research").all()
+
+    # Emails already present in the blog list (to avoid duplicates)
+    existing_blog = {e.email for e in db.query(OutreachEntry).filter(
+        OutreachEntry.mode == "blog").all()}
+
+    moved = skipped = 0
+    for e in old:
+        if e.email in existing_blog:
+            # Already in blog list — remove the duplicate client copy
+            db.delete(e)
+            skipped += 1
+        else:
+            e.mode = "blog"
+            existing_blog.add(e.email)
+            moved += 1
+    db.commit()
+    return {"moved": moved, "skipped_duplicates": skipped,
+            "message": f"Moved {moved} blog emails to blog dashboard, "
+                       f"removed {skipped} duplicates."}
+
+
 @router.get("/blog/debug")
-def blog_debug(site: str = "techbullion.com"):
+def blog_debug(site: str = "techbullion.com", time_range: str = "1m"):
     """Diagnostic: test what the engine sees for a given site."""
     from . import blog_research
-    out = {"site": site}
+    from datetime import datetime
+    out = {"site": site, "time_range": time_range}
     root = blog_research._root(site)
     out["root"] = root
-    html = blog_research._fetch("https://" + root)
+    base = "https://" + root
+    html = blog_research._fetch(base)
     if not html:
         html = blog_research._fetch("http://" + root)
     out["homepage_fetched"] = bool(html)
     out["homepage_size"] = len(html) if html else 0
+
+    # --- Sitemap diagnostics: which sitemap works, how many entries, date impact ---
+    delta = blog_research.TIME_RANGES.get(time_range, blog_research.TIME_RANGES["1m"])
+    cutoff = datetime.utcnow() - delta
+    out["cutoff_date"] = cutoff.strftime("%Y-%m-%d")
+    sitemap_urls = ["/post-sitemap.xml", "/post-sitemap1.xml", "/sitemap-posts.xml",
+                    "/wp-sitemap-posts-post-1.xml", "/sitemap_index.xml",
+                    "/sitemap.xml", "/wp-sitemap.xml", "/news-sitemap.xml"]
+    sitemap_report = []
+    for sm in sitemap_urls:
+        sm_html = blog_research._fetch(base + sm)
+        if not sm_html:
+            sitemap_report.append({"path": sm, "found": False})
+            continue
+        entries = blog_research._parse_sitemap_entries(sm_html)
+        subs = [u for u, _ in entries if u.endswith(".xml")]
+        # How many would survive the date filter?
+        dated = with_date = too_old = 0
+        for u, mod in entries[:200]:
+            d = blog_research._parse_date(mod) or blog_research._date_from_url(u)
+            if d:
+                with_date += 1
+                if d < cutoff:
+                    too_old += 1
+            dated += 1
+        rep = {
+            "path": sm, "found": True, "size": len(sm_html),
+            "total_entries": len(entries),
+            "sub_sitemaps": len(subs), "sample_sub": subs[:2],
+            "checked": dated, "had_date": with_date, "dropped_too_old": too_old,
+            "sample_dates": [m for _, m in entries[:3]],
+        }
+        # If parsing found nothing, show what the content actually looks like
+        if len(entries) == 0:
+            rep["raw_preview"] = sm_html[:400]
+            rep["has_loc_tag"] = "<loc" in sm_html.lower()
+            rep["has_url_tag"] = "<url" in sm_html.lower()
+            rep["looks_like_html"] = ("<!doctype html" in sm_html[:200].lower()
+                                      or "<html" in sm_html[:200].lower())
+        sitemap_report.append(rep)
+        # stop after first working non-index sitemap with real entries
+        if entries and not subs:
+            break
+    out["sitemaps"] = sitemap_report
+
     try:
-        articles = blog_research._find_articles(site, max_articles=150)
+        articles = blog_research._find_articles(site, 150, time_range)
         out["articles_found"] = len(articles)
         out["sample_articles"] = articles[:5]
     except Exception as e:
+        import traceback
         out["articles_error"] = str(e)
+        out["articles_traceback"] = traceback.format_exc()[-500:]
         articles = []
     # Check links in first 3 articles (not just 1)
     total_links = 0

@@ -94,7 +94,10 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
               "image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Only gzip/deflate — requests auto-decompresses these. Brotli (br) is NOT
+    # auto-decompressed unless the brotli package is present, which turns sitemap
+    # XML into garbage bytes. Leaving br out forces the server to send gzip/plain.
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -133,6 +136,33 @@ def _is_skip(domain):
     return False
 
 
+def _decode_body(r):
+    """Return decoded text, handling gzip / brotli / .xml.gz even when requests
+    didn't auto-decompress (e.g. brotli without the brotli package, or a
+    mislabeled .gz sitemap). Falls back to r.text if content looks fine."""
+    content = r.content
+    if not content:
+        return ""
+    # gzip magic bytes: 1f 8b
+    if content[:2] == b"\x1f\x8b":
+        try:
+            import gzip
+            return gzip.decompress(content).decode("utf-8", "replace")
+        except Exception:
+            pass
+    # brotli: no reliable magic number; try to decode if it doesn't look like text
+    enc = (r.headers.get("Content-Encoding") or "").lower()
+    if "br" in enc:
+        try:
+            import brotli
+            return brotli.decompress(content).decode("utf-8", "replace")
+        except Exception:
+            # brotli package missing — try requests' own text as last resort
+            pass
+    # Normal path
+    return r.text
+
+
 def _fetch(url, timeout=8):
     try:
         r = _session.get(url, timeout=timeout, allow_redirects=True)
@@ -144,25 +174,45 @@ def _fetch(url, timeout=8):
             except Exception:
                 return None
         if r.status_code == 200:
-            return r.text
+            text = _decode_body(r)
+            # If it still looks like binary garbage (lots of non-text bytes),
+            # bail so we don't feed junk into the parser.
+            if text and text.count("\ufffd") > len(text) * 0.1:
+                return None
+            return text
     except Exception:
         pass
     return None
 
 
 def _parse_sitemap_entries(xml):
-    """Return [(url, lastmod)] from a sitemap, so we can sort recent-first."""
+    """Return [(url, lastmod)] from a sitemap or sitemap-index.
+    Robust against namespaces, attributes, whitespace, and both <url> (page
+    sitemap) and <sitemap> (index) block types."""
+    if not xml:
+        return []
     entries = []
-    # Match <url>...<loc>X</loc>...<lastmod>Y</lastmod>...</url> blocks
-    for block in re.findall(r"<url>(.*?)</url>", xml, re.S):
-        loc_m = re.search(r"<loc>\s*(.*?)\s*</loc>", block)
-        mod_m = re.search(r"<lastmod>\s*(.*?)\s*</lastmod>", block)
-        if loc_m:
-            entries.append((loc_m.group(1).strip(), mod_m.group(1).strip() if mod_m else ""))
-    # Fallback: plain <loc> list with no <url> wrapper
+    # Match BOTH <url>...</url> (page sitemap) and <sitemap>...</sitemap> (index).
+    # [^>]* allows namespaced/attributed tags like <url xmlns="...">.
+    block_re = re.compile(r"<(?:url|sitemap)\b[^>]*>(.*?)</(?:url|sitemap)>", re.S | re.I)
+    loc_re = re.compile(r"<loc\b[^>]*>\s*(.*?)\s*</loc>", re.S | re.I)
+    mod_re = re.compile(r"<lastmod\b[^>]*>\s*(.*?)\s*</lastmod>", re.S | re.I)
+    for block in block_re.findall(xml):
+        loc_m = loc_re.search(block)
+        if not loc_m:
+            continue
+        mod_m = mod_re.search(block)
+        url = loc_m.group(1).strip()
+        # Strip CDATA wrappers and stray whitespace/newlines
+        url = re.sub(r"^<!\[CDATA\[|\]\]>$", "", url).strip()
+        if url:
+            entries.append((url, mod_m.group(1).strip() if mod_m else ""))
+    # Fallback: ANY <loc> anywhere (some sitemaps have no url/sitemap wrappers)
     if not entries:
-        for loc in re.findall(r"<loc>\s*(.*?)\s*</loc>", xml):
-            entries.append((loc.strip(), ""))
+        for loc in loc_re.findall(xml):
+            u = re.sub(r"^<!\[CDATA\[|\]\]>$", "", loc.strip()).strip()
+            if u:
+                entries.append((u, ""))
     return entries
 
 
@@ -178,6 +228,30 @@ def _parse_date(s):
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except Exception:
             return None
+    return None
+
+
+def _date_from_url(url):
+    """Many blogs put the publish date in the URL: /2018/02/13/slug or /2018/02/slug.
+    Returns datetime or None."""
+    # /YYYY/MM/DD/
+    m = re.search(r"/(\d{4})/(\d{1,2})/(\d{1,2})/", url)
+    if m:
+        try:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 2000 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
+                return datetime(y, mo, d)
+        except Exception:
+            pass
+    # /YYYY/MM/
+    m = re.search(r"/(\d{4})/(\d{1,2})/", url)
+    if m:
+        try:
+            y, mo = int(m.group(1)), int(m.group(2))
+            if 2000 <= y <= 2100 and 1 <= mo <= 12:
+                return datetime(y, mo, 1)
+        except Exception:
+            pass
     return None
 
 
@@ -232,7 +306,7 @@ def _find_articles(site, max_articles=30, time_range="1m"):
     older than the cutoff using sitemap <lastmod> dates and URL-embedded dates."""
     root = _root(site)
     base = "https://" + root
-    articles = []
+    articles = []  # list of (url, date_str)
     seen = set()
 
     # Date cutoff: articles older than this are skipped
@@ -240,11 +314,10 @@ def _find_articles(site, max_articles=30, time_range="1m"):
     cutoff = datetime.utcnow() - delta
 
     def _too_old(url, lastmod):
-        """True if the article is older than the cutoff. If we have NO date
-        signal at all, keep it (don't wrongly drop undated posts)."""
+        """True if the article is older than the cutoff."""
         d = _parse_date(lastmod) or _date_from_url(url)
         if d is None:
-            return False  # no date info — keep (better than dropping good posts)
+            return False  # no date info — keep
         return d < cutoff
 
     def _add(url, lastmod=""):
@@ -252,41 +325,70 @@ def _find_articles(site, max_articles=30, time_range="1m"):
         if u in seen or _root(u) != root or u.endswith(".xml"):
             return
         if _too_old(u, lastmod):
-            return  # older than the selected time range — skip
+            return
         seen.add(u)
-        articles.append(u)
+        articles.append((u, lastmod))
 
-    # 1. SITEMAP FIRST — real dated posts, newest-first
-    sitemap_urls = ["/post-sitemap.xml", "/post-sitemap1.xml", "/sitemap-posts.xml",
-                    "/wp-sitemap-posts-post-1.xml", "/sitemap_index.xml",
-                    "/sitemap.xml", "/wp-sitemap.xml", "/news-sitemap.xml"]
-    for sm in sitemap_urls:
-        sm_html = _fetch(base + sm)
+    # 1. SITEMAP FIRST. Big WordPress sites split posts across MANY numbered
+    # sitemaps (post-sitemap.xml, post-sitemap2.xml, post-sitemap3.xml...).
+    # In Yoast, HIGHER numbers usually hold the NEWEST posts. We gather from the
+    # sitemap index if present, PLUS follow numbered sitemaps until they run out.
+    index_urls = ["/sitemap_index.xml", "/sitemap.xml", "/wp-sitemap.xml"]
+    post_sitemaps = []
+    for ix in index_urls:
+        ix_html = _fetch(base + ix)
+        if not ix_html:
+            continue
+        ix_entries = _parse_sitemap_entries(ix_html)
+        subs = [u for u, _ in ix_entries if u.endswith(".xml")
+                and any(k in u.lower() for k in ["post", "article", "news", "blog"])]
+        if subs:
+            post_sitemaps = subs
+            break
+
+    # If the index didn't list post sitemaps, probe numbered ones directly.
+    if not post_sitemaps:
+        # Probe forward: post-sitemap.xml, post-sitemap2..post-sitemap40.
+        # Collect ALL that exist (don't stop at first gap — some sites skip numbers).
+        candidates = [base + "/post-sitemap.xml"]
+        for n in range(2, 41):
+            candidates.append(f"{base}/post-sitemap{n}.xml")
+        post_sitemaps = candidates
+
+    # Fallbacks for non-Yoast sites
+    extra = ["/sitemap-posts.xml", "/wp-sitemap-posts-post-1.xml",
+             "/wp-sitemap-posts-post-2.xml", "/news-sitemap.xml"]
+    for e in extra:
+        post_sitemaps.append(base + e)
+
+    # Read highest-numbered first (newest posts usually there), but DON'T stop
+    # early on gaps — gather from every sitemap that actually returns entries.
+    def _sm_sort_key(u):
+        m = re.search(r"post-sitemap(\d+)\.xml", u)
+        return int(m.group(1)) if m else (1 if "post-sitemap.xml" in u else 0)
+    post_sitemaps = sorted(set(post_sitemaps), key=_sm_sort_key, reverse=True)
+
+    all_entries = []
+    fetched_ok = 0
+    for sm in post_sitemaps:
+        sm_html = _fetch(sm)
         if not sm_html:
             continue
-        entries = _parse_sitemap_entries(sm_html)
-        if not entries:
-            continue
-        # Sitemap index? follow post/news sub-sitemaps
-        sub_sitemaps = [u for u, _ in entries if u.endswith(".xml")]
-        if sub_sitemaps:
-            all_entries = []
-            for sub in sub_sitemaps:
-                if any(k in sub.lower() for k in ["post", "article", "news", "blog"]):
-                    sub_html = _fetch(sub)
-                    if sub_html:
-                        all_entries.extend(_parse_sitemap_entries(sub_html))
-                if len(all_entries) >= max_articles * 3:
-                    break
-            entries = all_entries or entries
-        # Sort newest-first by lastmod (empty dates go last)
-        entries.sort(key=lambda x: x[1] or "0", reverse=True)
-        for url, _mod in entries:
-            _add(url, _mod)
+        ents = _parse_sitemap_entries(sm_html)
+        ents = [(u, m) for u, m in ents if not u.endswith(".xml")]
+        if ents:
+            all_entries.extend(ents)
+            fetched_ok += 1
+        # Once we have plenty AND have read a few sitemaps, stop (enough to sort)
+        if len(all_entries) >= max_articles * 30 and fetched_ok >= 2:
+            break
+
+    if all_entries:
+        all_entries.sort(key=lambda x: x[1] or "0", reverse=True)
+        for url, mod in all_entries:
+            _add(url, mod)
             if len(articles) >= max_articles:
                 break
-        if len(articles) >= max_articles:
-            break
 
     # 2. HOMEPAGE FALLBACK — only if sitemap gave little
     if len(articles) < 5:
@@ -301,16 +403,38 @@ def _find_articles(site, max_articles=30, time_range="1m"):
                 if not path:
                     continue
                 low = path.lower()
-                if any(x in low for x in ["/tag/", "/category/", "/author/", "/page/",
-                                          "/wp-", "/feed", "contact", "about", "privacy",
-                                          "terms", ".jpg", ".png", ".css", ".js"]):
+                # Reject non-article pages: categories, tags, homepage sections,
+                # advertise/press/about pages etc.
+                if any(x in low for x in ["/tag/", "tag/", "/category/", "category/",
+                                          "/author/", "author/", "/page/", "page/",
+                                          "/wp-", "/feed", "feed/", "contact", "about",
+                                          "privacy", "terms", "advertise", "press-release",
+                                          "press-releases", "sitemap", "disclaimer",
+                                          "subscribe", "newsletter", "login", "register",
+                                          ".jpg", ".png", ".css", ".js", ".pdf"]):
                     continue
                 last = path.split("/")[-1]
-                looks_like_article = (last.count("-") >= 2 and len(last) > 15) or path.count("/") >= 2
+                # Real articles have descriptive slugs (multiple hyphens, longer text)
+                looks_like_article = (last.count("-") >= 3 and len(last) > 25)
                 if looks_like_article:
                     _add(full)  # homepage links have no lastmod; URL date checked inside
                 if len(articles) >= max_articles:
                     break
+
+    # 3. SAFETY NET — if the date filter dropped EVERYTHING but the sitemap did
+    # have posts, take the newest ones anyway (better to show recent posts than
+    # nothing). This handles sites whose dates are all outside the window or
+    # whose sitemap lacks lastmod entirely. Reuses the already-gathered,
+    # newest-first all_entries.
+    if not articles and all_entries:
+        for url, mod in all_entries:  # already sorted newest-first
+            u = url.split("#")[0].split("?")[0].rstrip("/")
+            if u in seen or _root(u) != root or u.endswith(".xml"):
+                continue
+            seen.add(u)
+            articles.append((u, mod))
+            if len(articles) >= max_articles:
+                break
 
     return articles[:max_articles]
 
@@ -420,13 +544,16 @@ def _extract_external_links(article_url, cutoff=None):
 
 
 def research_site(site, time_range="1m", max_articles=30, workers=10,
-                  on_article=None, on_link=None):
+                  on_article=None, on_link=None, should_stop=None):
     """Research one blog site: find articles, extract external links.
     Articles processed in PARALLEL (10 workers). Live callbacks:
       on_article(article_url, count) — as each article is opened
-      on_link(link_dict) — for each new external link found."""
+      on_link(link_dict) — for each new external link found
+      should_stop() — return True to abort immediately (checked per article)."""
     results = []
-    articles = _find_articles(site, max_articles, time_range)
+    if should_stop and should_stop():
+        return results
+    article_pairs = _find_articles(site, max_articles, time_range)  # list of (url, date)
     global_seen_domains = set()
     counter = [0]
 
@@ -434,20 +561,34 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
     delta = TIME_RANGES.get(time_range, timedelta(days=30))
     cutoff = datetime.utcnow() - delta
 
-    def _do_article(article):
-        return (article, _extract_external_links(article, cutoff))
+    def _do_article(pair):
+        article, date_str = pair
+        if should_stop and should_stop():
+            return (article, date_str, [])
+        return (article, date_str, _extract_external_links(article, cutoff))
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_do_article, a) for a in articles]
+        futures = [ex.submit(_do_article, p) for p in article_pairs]
         for fut in as_completed(futures):
+            # Stop fast: as soon as the flag is set, stop collecting results
+            if should_stop and should_stop():
+                for f in futures:
+                    f.cancel()
+                break
             try:
-                article, links = fut.result()
+                article, date_str, links = fut.result()
             except Exception:
                 continue
             counter[0] += 1
             if on_article:
                 try: on_article(article, counter[0])
                 except Exception: pass
+            # Clean the date to just YYYY-MM-DD for display
+            pub_date = ""
+            if date_str:
+                d = _parse_date(date_str)
+                if d:
+                    pub_date = d.strftime("%Y-%m-%d")
             for target_domain, target_url in links:
                 if target_domain in global_seen_domains:
                     continue
@@ -457,6 +598,7 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
                     "source_article": article,
                     "target_domain": target_domain,
                     "target_url": target_url,
+                    "published_date": pub_date,
                 }
                 results.append(link_data)
                 if on_link:
