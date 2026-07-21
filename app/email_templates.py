@@ -126,8 +126,13 @@ def get_template(index: int) -> dict:
 def render_template(template: dict, variables: dict) -> dict:
     subject = template["subject"]
     body = template["body"]
+    # Add the footer FIRST, then replace variables — otherwise the
+    # {{unsubscribe_url}} inside COMPANY_FOOTER never gets substituted and the
+    # unsubscribe link ends up broken.
+    body_html_raw = body.replace(chr(10), "<br>") + COMPANY_FOOTER
     for key, val in variables.items():
-        subject = subject.replace("{{" + key + "}}", str(val))
-        body = body.replace("{{" + key + "}}", str(val))
-    body_html = body.replace(chr(10), "<br>") + COMPANY_FOOTER
-    return {"subject": subject, "body": body, "body_html": body_html}
+        token = "{{" + key + "}}"
+        subject = subject.replace(token, str(val))
+        body = body.replace(token, str(val))
+        body_html_raw = body_html_raw.replace(token, str(val))
+    return {"subject": subject, "body": body, "body_html": body_html_raw}

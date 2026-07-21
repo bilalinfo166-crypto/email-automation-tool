@@ -95,8 +95,11 @@ def get_vendor_template(index: int) -> dict:
 def render_vendor_template(template: dict, variables: dict) -> dict:
     subject = template["subject"]
     body = template["body"]
+    # Footer added BEFORE replacement so {{unsubscribe_url}} inside it works.
+    body_html_raw = body.replace(chr(10), "<br>") + COMPANY_FOOTER
     for key, val in variables.items():
-        subject = subject.replace("{{" + key + "}}", str(val))
-        body = body.replace("{{" + key + "}}", str(val))
-    body_html = body.replace(chr(10), "<br>") + COMPANY_FOOTER
-    return {"subject": subject, "body": body, "body_html": body_html}
+        token = "{{" + key + "}}"
+        subject = subject.replace(token, str(val))
+        body = body.replace(token, str(val))
+        body_html_raw = body_html_raw.replace(token, str(val))
+    return {"subject": subject, "body": body, "body_html": body_html_raw}

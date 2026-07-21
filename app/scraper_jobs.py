@@ -26,6 +26,8 @@ from .crm_models import ScraperJob, ScraperJobDomain, ScraperResult
 from . import scraper, compliance
 
 _threads: dict[int, threading.Thread] = {}
+# In-memory stop flags — checked on EVERY domain so Stop is instant, not batched.
+_stop_flags: dict[int, bool] = {}
 
 
 def _calc_workers(total_domains: int) -> int:
@@ -184,6 +186,7 @@ def _run(job_id: int):
     try:
         job = db.get(ScraperJob, job_id)
         if not job: return
+        _stop_flags.pop(job_id, None)  # fresh run — clear any old stop flag
         job.status = "running"; db.commit()
         limit = job.max_per_domain or 2
         mode = job.mode or "vendor"
@@ -229,6 +232,14 @@ def _run(job_id: int):
         while futures:
             done_fut = next(iter(as_completed(futures)))
             did = futures.pop(done_fut)
+
+            # INSTANT STOP: check the in-memory flag on every single domain.
+            # This makes Stop take effect immediately, not after a batch.
+            if _stop_flags.get(job_id):
+                pool.shutdown(wait=False, cancel_futures=True)
+                db.refresh(job)
+                job.status = "stopped"; db.commit()
+                break
 
             try:
                 jd = db.get(ScraperJobDomain, did)
@@ -305,6 +316,9 @@ def start(job_id: int):
 # ---------------- controls ----------------
 
 def stop(db, job_id: int):
+    # Set the in-memory flag FIRST so the worker halts on its next domain,
+    # then mark the DB status. This makes Stop feel instant.
+    _stop_flags[job_id] = True
     job = db.get(ScraperJob, job_id)
     if job and job.status == "running":
         job.status = "stopped"; db.commit()
@@ -312,6 +326,7 @@ def stop(db, job_id: int):
 
 
 def resume(db, job_id: int):
+    _stop_flags.pop(job_id, None)  # clear any stale stop flag
     job = db.get(ScraperJob, job_id)
     if job and job.status in ("stopped", "queued"):
         job.status = "running"; db.commit()
@@ -320,6 +335,7 @@ def resume(db, job_id: int):
 
 
 def restart(db, job_id: int):
+    _stop_flags.pop(job_id, None)  # clear any stale stop flag
     job = db.get(ScraperJob, job_id)
     if not job:
         return None
@@ -337,6 +353,7 @@ def retry_failed(db, job_id: int):
     job = db.get(ScraperJob, job_id)
     if not job:
         return None
+    _stop_flags.pop(job_id, None)  # clear stale stop flag before retrying
     retried = 0
     for jd in db.query(ScraperJobDomain).filter(
         ScraperJobDomain.job_id == job_id,

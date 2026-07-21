@@ -14,6 +14,12 @@ class Settings:
     FERNET_KEY = os.getenv("FERNET_KEY", "")
     SENDING_DOMAIN = os.getenv("SENDING_DOMAIN", "").strip().lower()
     FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
+    # Public base URL used inside emails for unsubscribe + open-tracking links.
+    # For real recipients this MUST be a public address (deployed domain or an
+    # ngrok tunnel), NOT 127.0.0.1 — otherwise the link points at the
+    # recipient's own machine and does nothing. Defaults to localhost for local
+    # testing. Set PUBLIC_URL in .env, e.g. PUBLIC_URL=https://mail.uplyncio.com
+    PUBLIC_URL = os.getenv("PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")
 
     # OAuth scopes: send email + read (read is used later for warmup)
     SCOPES = [

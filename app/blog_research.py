@@ -88,6 +88,66 @@ TIME_RANGES = {
     "1y": timedelta(days=365),
 }
 
+# Giant news portals / aggregators — these are NOT guest-post targets. They
+# don't accept guest posts, are JavaScript-heavy, have no standard sitemap, and
+# aggregate content from elsewhere. Warn the user instead of wasting time.
+NOT_BLOG_SITES = {
+    "msn.com", "yahoo.com", "news.yahoo.com", "google.com", "news.google.com",
+    "bing.com", "duckduckgo.com", "apple.com", "news.apple.com",
+    "facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com",
+    "reddit.com", "youtube.com", "tiktok.com", "pinterest.com", "quora.com",
+    "medium.com", "substack.com", "wikipedia.org", "wikihow.com",
+    "cnn.com", "bbc.com", "bbc.co.uk", "forbes.com", "reuters.com",
+    "bloomberg.com", "nytimes.com", "washingtonpost.com", "theguardian.com",
+    "wsj.com", "usatoday.com", "cnbc.com", "foxnews.com", "nbcnews.com",
+    "abcnews.go.com", "buzzfeed.com", "huffpost.com", "businessinsider.com",
+    "flipboard.com", "feedly.com", "pocket.com", "smartnews.com",
+    "amazon.com", "ebay.com", "walmart.com", "etsy.com", "aliexpress.com",
+}
+
+
+def check_site(site):
+    """Quick pre-check before researching. Returns a dict:
+      {ok: bool, reason: str, hint: str}
+    Tells the user upfront if a site won't work as a guest-post prospect."""
+    root = _root(site)
+    if not root or "." not in root:
+        return {"ok": False, "reason": "invalid_url",
+                "hint": "That doesn't look like a valid website. Enter a domain like 'techbullion.com'."}
+
+    # Known non-blog / aggregator?
+    bare = root.replace("www.", "")
+    if bare in NOT_BLOG_SITES or _is_skip(root):
+        return {"ok": False, "reason": "not_a_blog",
+                "hint": f"'{bare}' is a giant news portal / aggregator, not a guest-post site. "
+                        "It doesn't accept guest posts and has no standard sitemap. "
+                        "Target smaller niche blogs instead (the kind that publish sponsored/guest articles)."}
+
+    # Can we even reach it?
+    base = "https://" + root
+    html = _fetch(base) or _fetch("http://" + root)
+    if not html:
+        return {"ok": False, "reason": "unreachable",
+                "hint": f"Couldn't load '{bare}'. It may be down, blocking bots, or behind heavy protection."}
+
+    # Does it have ANY sitemap? (best signal it's a real, crawlable blog)
+    has_sitemap = False
+    for sm in ["/sitemap.xml", "/sitemap_index.xml", "/post-sitemap.xml",
+               "/wp-sitemap.xml", "/news-sitemap.xml"]:
+        if _fetch(base + sm):
+            has_sitemap = True
+            break
+
+    if not has_sitemap:
+        return {"ok": True, "reason": "no_sitemap",
+                "hint": f"'{bare}' has no standard sitemap — results may be limited. "
+                        "It may be a JavaScript-heavy site. We'll try the homepage, but a "
+                        "normal WordPress/blog site works best."}
+
+    return {"ok": True, "reason": "looks_good",
+            "hint": f"'{bare}' looks like a crawlable blog. Good to go."}
+
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -473,29 +533,39 @@ def _extract_external_links(article_url, cutoff=None):
         tag.decompose()
 
     # 2) Strip ad / sponsored / widget / related / promo containers by class or id.
-    #    This is what removes "recommended for you", ad slots, affiliate boxes etc.
-    JUNK_CONTAINER = re.compile(
-        r"(menu|nav|sidebar|footer|header|widget|related|share|social|comment|"
-        r"\bad\b|ads|advert|sponsor|promot|promo|banner|affiliate|partner|"
-        r"taboola|outbrain|revcontent|mgid|zergnet|newsletter|subscribe|"
-        r"popup|modal|cta|call-to-action|recommend|trending|popular|"
-        r"author-bio|author-box|about-author|bio-box|post-meta|entry-meta|"
-        r"tags|tag-list|breadcrumb|pagination|more-from|read-more|read-next)",
-        re.I)
-    for tag in soup.find_all(attrs={"class": JUNK_CONTAINER}):
+    #    Uses WORD-BOUNDARY matching so it only kills real junk containers
+    #    (e.g. "related-posts", "ad-slot") and NOT main content divs whose class
+    #    merely contains a substring (e.g. "main-content", "advertise-content").
+    JUNK_WORDS = ["sidebar", "navbar", "navmenu", "footer", "header-",
+                  "related", "share", "sharing", "social", "comment",
+                  "advert", "sponsor", "promoted", "promo-", "banner",
+                  "affiliate", "taboola", "outbrain", "revcontent", "mgid",
+                  "zergnet", "newsletter", "subscribe", "popup", "modal",
+                  "read-more", "read-next", "more-from", "recommended",
+                  "trending", "author-bio", "author-box", "about-author",
+                  "bio-box", "breadcrumb", "pagination", "widget-"]
+    def _is_junk_class(val):
+        if not val:
+            return False
+        s = " ".join(val) if isinstance(val, list) else str(val)
+        s = s.lower()
+        return any(w in s for w in JUNK_WORDS)
+    for tag in soup.find_all(attrs={"class": _is_junk_class}):
         tag.decompose()
-    for tag in soup.find_all(attrs={"id": JUNK_CONTAINER}):
+    for tag in soup.find_all(attrs={"id": _is_junk_class}):
         tag.decompose()
     # Also strip anything explicitly marked as an ad region
     for tag in soup.find_all(attrs={"data-ad": True}):
         tag.decompose()
-    for tag in soup.find_all(attrs={"role": re.compile(r"(banner|complementary|navigation)", re.I)}):
+    for tag in soup.find_all(attrs={"role": re.compile(r"^(banner|complementary|navigation)$", re.I)}):
         tag.decompose()
 
-    # 3) Pick the real article-content container
+    # 3) Pick the real article-content container — try many patterns, widest net
     body = (soup.find("article")
-            or soup.find("div", class_=re.compile(r"(entry-content|post-content|article-content|td-post-content|single-content|post-body|content-area|article-body|story-body)", re.I))
+            or soup.find(attrs={"class": re.compile(r"(entry-content|post-content|article-content|td-post-content|single-content|post-body|content-area|article-body|story-body|article__body|post__content|c-content|main-content|page-content|blog-content|story__content|rich-text|prose)", re.I)})
+            or soup.find(attrs={"itemprop": "articleBody"})
             or soup.find("main")
+            or soup.find("body")
             or soup)
 
     # Affiliate / tracking / redirect hosts that are never real prospect sites
@@ -506,40 +576,43 @@ def _extract_external_links(article_url, cutoff=None):
         r"doubleclick|googlesyndication|googleadservices|adservice|"
         r"utm_medium=affiliate|/ref=|/aff/|tag=|/go/|/out/|/click)", re.I)
 
-    links = []
-    seen_domains = set()
-    for a in body.find_all("a", href=True):
-        href = a["href"].strip()
-        if not href.startswith("http"):
-            continue
+    def _collect(container):
+        found = []
+        seen = set()
+        for a in container.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href.startswith("http"):
+                continue
+            rel = " ".join(a.get("rel", [])).lower() if a.get("rel") else ""
+            if "sponsored" in rel:
+                continue
+            target_root = _root(href)
+            if not target_root:
+                continue
+            if AFFILIATE_HOSTS.search(href):
+                continue
+            bare_root = root.replace("www.", "")
+            bare_target = target_root.replace("www.", "")
+            if (bare_target == bare_root or bare_root.endswith("." + bare_target)
+                    or bare_target.endswith("." + bare_root)):
+                continue
+            if _is_skip(target_root):
+                continue
+            if bare_target in seen:
+                continue
+            seen.add(bare_target)
+            found.append((bare_target, href.split("#")[0]))
+        return found
 
-        # Skip ONLY sponsored links (real paid ads). Do NOT skip nofollow —
-        # guest-post / editorial links are very commonly nofollow, and that
-        # domain owner is exactly the active prospect we want.
-        rel = " ".join(a.get("rel", [])).lower() if a.get("rel") else ""
-        if "sponsored" in rel:
-            continue
+    links = _collect(body)
 
-        target_root = _root(href)
-        if not target_root:
-            continue
+    # FALLBACK: if the chosen container gave nothing but the page clearly has
+    # external links elsewhere, re-scan the whole cleaned page. This handles
+    # sites whose content isn't in a recognized container. Structural chrome
+    # (nav/header/footer) was already stripped above, so this stays clean.
+    if not links and body is not soup:
+        links = _collect(soup)
 
-        # Skip affiliate / tracking / redirect links (these aren't real prospects)
-        if AFFILIATE_HOSTS.search(href):
-            continue
-
-        # Skip internal links (same root, ignoring www / subdomain)
-        bare_root = root.replace("www.", "")
-        bare_target = target_root.replace("www.", "")
-        if bare_target == bare_root or bare_root.endswith("." + bare_target) or bare_target.endswith("." + bare_root):
-            continue
-        if _is_skip(target_root):
-            continue  # giant site — skip
-        # Dedupe within THIS article: same domain -> keep only 1
-        if bare_target in seen_domains:
-            continue
-        seen_domains.add(bare_target)
-        links.append((bare_target, href.split("#")[0]))
     return links
 
 

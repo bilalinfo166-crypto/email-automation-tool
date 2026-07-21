@@ -1663,7 +1663,7 @@
           </div>
           <!-- Links table -->
           <div class="slist">
-            <div class="srow head" style="grid-template-columns:1fr 1.4fr 1fr .8fr"><span>From Site</span><span>Source Article</span><span>Target Domain</span><span>Email</span></div>
+            <div class="srow head" style="grid-template-columns:.9fr .7fr 1.3fr 1fr .8fr"><span>From Site</span><span>Date</span><span>Source Article</span><span>Target Domain</span><span>Email</span></div>
             <div id="blogLinkRows"></div>
           </div>
         </div>
@@ -2629,6 +2629,32 @@ function createBlogJob(startNow){
   var st=document.getElementById('blogCreateStatus');
   if(!sites.trim()){showToast('Add at least one blog site','error');return;}
   st.style.display='block';
+  st.innerHTML='<span class="spin"></span> Checking sites...';
+  // PRE-CHECK: warn about giant portals / unreachable sites before researching
+  apiCall('/crm/blog/check-sites?sites='+encodeURIComponent(sites),'POST').then(function(chk){
+    var bad=(chk.results||[]).filter(function(r){return !r.ok;});
+    if(bad.length>0){
+      // Show which sites are problematic
+      var msg=bad.map(function(b){return '• '+b.site+': '+b.hint;}).join('<br>');
+      st.innerHTML='<div style="color:var(--amber);font-size:12.5px;line-height:1.6">'+
+        '<b>⚠ '+bad.length+' site(s) may not work as guest-post prospects:</b><br>'+msg+
+        '<br><br><button onclick="_doCreateBlog('+startNow+')" class="btn sm" style="margin-right:8px">Continue anyway</button>'+
+        '<button onclick="document.getElementById(\'blogCreateStatus\').style.display=\'none\'" class="btn sm" style="background:var(--panel-2)">Cancel</button>'+
+        '</div>';
+      return;
+    }
+    // All good — create directly
+    _doCreateBlog(startNow);
+  }).catch(function(){ _doCreateBlog(startNow); }); // if check fails, proceed anyway
+}
+
+function _doCreateBlog(startNow){
+  var name=document.getElementById('blogName').value||'';
+  var sites=document.getElementById('blogSites').value||'';
+  var timeRange=document.getElementById('blogTimeRange').value||'1m';
+  var autopilot=document.getElementById('blogAutopilot').value==='true';
+  var st=document.getElementById('blogCreateStatus');
+  st.style.display='block';
   st.innerHTML='<span class="spin"></span> Creating research job...';
   var params='name='+encodeURIComponent(name)+'&sites='+encodeURIComponent(sites)+'&time_range='+timeRange+'&autopilot='+autopilot;
   apiCall('/crm/blog/create?'+params,'POST').then(r=>{
@@ -2772,8 +2798,13 @@ function loadBlogLinks(jobId){
       var emailCell=l.email
         ? '<span style="color:var(--green)">'+l.email+'</span>'
         : (l.email_status==='no_email'?'<span style="color:var(--faint)">—</span>':'<span style="color:var(--muted)">pending</span>');
-      return '<div class="srow" style="grid-template-columns:1fr 1.4fr 1fr .8fr;cursor:default">'+
+      // Published date cell
+      var dateCell=l.published_date
+        ? '<span style="font-size:11px;color:var(--ink);font-family:var(--mono)">'+l.published_date+'</span>'
+        : '<span style="font-size:11px;color:var(--faint)">—</span>';
+      return '<div class="srow" style="grid-template-columns:.9fr .7fr 1.3fr 1fr .8fr;cursor:default">'+
         '<div style="font-size:12px;color:var(--muted)">'+l.source_site+'</div>'+
+        '<div>'+dateCell+'</div>'+
         '<div style="overflow:hidden">'+artCell+'</div>'+
         '<div>'+tgtCell+'</div>'+
         '<div style="font-size:11px">'+emailCell+'</div></div>';

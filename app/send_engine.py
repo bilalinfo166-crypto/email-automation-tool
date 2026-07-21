@@ -14,9 +14,10 @@ import uuid
 from datetime import datetime, timedelta
 from .database import SessionLocal, Sender
 from .crm_models import OutreachEntry, EventLog, Campaign
-from .gmail_send import send_via_smtp
+from .gmail_send import send_via_smtp, send_via_oauth
 from .email_templates import get_template, render_template
 from . import security
+from .config import settings
 
 _send_threads = {}
 _stop_flags = {}
@@ -59,7 +60,10 @@ def _build_variables(entry, sender, unsub_token=""):
     company = raw.title()
 
     # Unsubscribe URL: token-based (works with /unsubscribe?t=TOKEN endpoint)
-    unsub_url = f"http://127.0.0.1:8000/unsubscribe?t={unsub_token}" if unsub_token else f"http://127.0.0.1:8000/unsubscribe?t=none"
+    # Unsubscribe URL: token-based, using the configured public base URL.
+    # (127.0.0.1 for local testing; a public domain/ngrok URL for real sends.)
+    base = settings.PUBLIC_URL
+    unsub_url = f"{base}/unsubscribe?t={unsub_token}" if unsub_token else f"{base}/unsubscribe?t=none"
 
     return {
         # company_name in body = clean name only ("Today")
@@ -215,7 +219,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 # loads this image, which hits /track/open?t=TOKEN and marks the
                 # email as "opened". Uses the same token as unsubscribe.
                 tracking_pixel = (
-                    f'<img src="http://127.0.0.1:8000/track/open?t={token}" '
+                    f'<img src="{settings.PUBLIC_URL}/track/open?t={token}" '
                     f'width="1" height="1" alt="" '
                     f'style="display:none;width:1px;height:1px" />'
                 )
@@ -236,36 +240,56 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 except Exception:
                     pass  # verification failed — proceed with send anyway
 
-                # Send email
+                # Send email — supports BOTH OAuth and app-password senders.
                 try:
-                    app_pw = security.decrypt(sender.app_password) if sender.app_password else ""
-                    if sender.method == "app_password" and app_pw:
-                        send_via_smtp(
-                            sender_email=sender.email,
-                            sender_name=sender.name or "",
-                            app_password=app_pw,
-                            to=entry.email,
-                            subject=rendered["subject"],
-                            body_html=rendered["body_html"],
-                        )
-                        # Update status
+                    sent_ok = False
+                    if sender.method == "app_password":
+                        app_pw = security.decrypt(sender.app_password) if sender.app_password else ""
+                        if app_pw:
+                            send_via_smtp(
+                                sender_email=sender.email,
+                                sender_name=sender.name or "",
+                                app_password=app_pw,
+                                to=entry.email,
+                                subject=rendered["subject"],
+                                body_html=rendered["body_html"],
+                            )
+                            sent_ok = True
+                    elif sender.method == "oauth":
+                        import json
+                        creds_json = security.decrypt(sender.oauth_token) if sender.oauth_token else ""
+                        if creds_json:
+                            creds_dict = json.loads(creds_json)
+                            result = send_via_oauth(
+                                creds_dict=creds_dict,
+                                sender_email=sender.email,
+                                sender_name=sender.name or "",
+                                to=entry.email,
+                                subject=rendered["subject"],
+                                body_html=rendered["body_html"],
+                            )
+                            # OAuth may refresh the token — save the updated one
+                            if result.get("creds"):
+                                sender.oauth_token = security.encrypt(json.dumps(result["creds"]))
+                            sent_ok = True
+
+                    if sent_ok:
                         entry.status = "sent"
                         entry.sent_at = datetime.utcnow()
                         entry.sender_email = sender.email
                         entry.subject = rendered["subject"]
                         sender.sent_today = (sender.sent_today or 0) + 1
                         sender.total_sent = (sender.total_sent or 0) + 1
-
-                        # Log event
                         db.add(EventLog(campaign_id=campaign_id, sender_id=sender.id,
                                        type="sent", contact_id=0))
                         db.commit()
                         sent_count += 1
-                        last_sent_at[sender.email] = time.time()  # record for per-sender gap
+                        last_sent_at[sender.email] = time.time()
                         print(f"[SendEngine] Sent #{sent_count}: {entry.email} via {sender.email}")
                     else:
                         entry.status = "failed"
                         db.commit()
+                        print(f"[SendEngine] FAILED (no valid creds): {entry.email} via {sender.email}")
 
                 except Exception as e:
                     entry.status = "bounced"

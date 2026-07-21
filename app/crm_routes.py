@@ -848,6 +848,26 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
 _blog_threads = {}
 _blog_stop = {}
 
+
+@router.post("/blog/check-sites")
+def check_blog_sites(sites: str = ""):
+    """Pre-check sites before research. Warns about giant portals / aggregators
+    (MSN, Yahoo, Forbes...) and unreachable sites so the user doesn't waste time.
+    Returns a per-site verdict."""
+    from . import blog_research
+    site_list = [s.strip() for s in re.split(r"[,\n]", sites) if s.strip()]
+    results = []
+    warnings = 0
+    for s in site_list:
+        verdict = blog_research.check_site(s)
+        if not verdict["ok"]:
+            warnings += 1
+        results.append({"site": s, **verdict})
+    return {"results": results, "total": len(site_list),
+            "warnings": warnings,
+            "all_ok": warnings == 0}
+
+
 @router.post("/blog/create")
 def create_blog_job(name: str = "", sites: str = "", time_range: str = "1m",
                     max_articles: int = 150, autopilot: bool = False,
@@ -1425,13 +1445,40 @@ def blog_debug(site: str = "techbullion.com", time_range: str = "1m"):
     total_links = 0
     article_links = []
     for art in articles[:3]:
+        art_url = art[0] if isinstance(art, (list, tuple)) else art
+        art_date = art[1] if isinstance(art, (list, tuple)) and len(art) > 1 else ""
         try:
-            links = blog_research._extract_external_links(art)
+            links = blog_research._extract_external_links(art_url)
             total_links += len(links)
-            article_links.append({"article": art, "links": len(links),
-                                   "domains": [l[0] for l in links[:8]]})
+            # DEEP DIAGNOSTIC: count raw anchors vs external ones to see where
+            # links are being lost (no body container? all internal? filtered?)
+            diag = {}
+            try:
+                from bs4 import BeautifulSoup
+                html = blog_research._fetch(art_url)
+                if html:
+                    diag["html_size"] = len(html)
+                    soup = BeautifulSoup(html, "html.parser")
+                    all_a = soup.find_all("a", href=True)
+                    diag["total_anchors"] = len(all_a)
+                    ext = [a for a in all_a if a["href"].startswith("http")
+                           and blog_research._root(a["href"]) != blog_research._root(art_url)]
+                    diag["external_anchors"] = len(ext)
+                    diag["sample_external"] = [a["href"][:60] for a in ext[:5]]
+                    # Which body container was detected?
+                    import re as _re
+                    body = (soup.find("article") or
+                            soup.find("div", class_=_re.compile(r"(entry-content|post-content|article-content|article-body|story-body|content)", _re.I)) or
+                            soup.find("main"))
+                    diag["body_container"] = (body.name + "." + " ".join(body.get("class", []))) if body else "NONE (using whole page)"
+            except Exception as de:
+                diag["diag_error"] = str(de)
+            article_links.append({"article": art_url, "date": art_date,
+                                   "links": len(links),
+                                   "domains": [l[0] for l in links[:8]],
+                                   "diag": diag})
         except Exception as e:
-            article_links.append({"article": art, "error": str(e)})
+            article_links.append({"article": art_url, "error": str(e)})
     out["total_links_in_first_3"] = total_links
     out["per_article"] = article_links
     return out
