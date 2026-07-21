@@ -2496,10 +2496,25 @@ function renderScrRows(){
 }
 function scrControl(action){
   if(!scrJobId)return;
+  // Instant UI feedback before the server responds
+  var st=document.getElementById('scrStatus');
+  if(action==='stop'){
+    if(st) st.innerHTML='<span style="color:var(--amber)">⏸</span> Stopping…';
+    if(scrTimer){clearInterval(scrTimer);scrTimer=null;}
+  } else if(action==='resume'){
+    if(st) st.innerHTML='<span class="spin"></span> Resuming…';
+  } else if(action==='restart'){
+    if(st) st.innerHTML='<span class="spin"></span> Restarting…';
+  }
   apiCall('/crm/scraper/jobs/'+scrJobId+'/'+action+'?mode='+apiMode(),'POST').then(()=>{
-    if(action==='resume'||action==='restart'){scrTimer=setInterval(pollScraper,1500);}
+    if(action==='resume'||action==='restart'){
+      if(scrTimer)clearInterval(scrTimer);
+      scrTimer=setInterval(pollScraper,1500);
+    }
     pollScraper();
-  }).catch(e=>{document.getElementById('scrStatus').textContent='Error: '+e.message;});
+  }).catch(e=>{if(st)st.textContent='Error: '+e.message;});
+  // Poll immediately so status settles fast
+  pollScraper();
 }
 function scrExport(fmt){
   if(!scrJobId)return;
@@ -2507,9 +2522,12 @@ function scrExport(fmt){
 }
 function retryFailed(){
   if(!scrJobId){document.getElementById('scrStatus').textContent='No active job to retry.';return;}
+  // Instant feedback
+  document.getElementById('scrStatus').innerHTML='<span class="spin"></span> Retrying failed domains…';
+  document.getElementById('scrStopBtn').style.display='';
   apiCall('/crm/scraper/jobs/'+scrJobId+'/retry-failed?mode='+apiMode(),'POST').then(r=>{
     document.getElementById('scrStatus').innerHTML='<span class="spin"></span> Retrying '+r.retried+' failed domains…';
-    document.getElementById('scrStopBtn').style.display='';
+    if(scrTimer)clearInterval(scrTimer);
     scrTimer=setInterval(pollScraper,1500); pollScraper();
   }).catch(e=>{document.getElementById('scrStatus').textContent='Error: '+e.message;});
 }
@@ -3018,7 +3036,22 @@ function simulateOAuth(){
   // Real OAuth: call backend to get Google authorization URL
   apiCall('/auth/google/start').then(r=>{
     if(r.authorization_url){
-      window.open(r.authorization_url,'_blank','width=500,height=600');
+      // Size the popup relative to the screen with even margins on all sides,
+      // then center it. dualScreen values handle multi-monitor setups.
+      var dualLeft=(window.screenLeft!==undefined)?window.screenLeft:screen.left;
+      var dualTop=(window.screenTop!==undefined)?window.screenTop:screen.top;
+      var sw=window.innerWidth||document.documentElement.clientWidth||screen.width;
+      var sh=window.innerHeight||document.documentElement.clientHeight||screen.height;
+      // Leave ~10% margin on each side (so popup = ~80% of the window),
+      // but keep it within sensible min/max bounds.
+      var w=Math.min(Math.max(Math.round(sw*0.80),560),1100);
+      var h=Math.min(Math.max(Math.round(sh*0.80),650),900);
+      var left=Math.round((sw-w)/2)+dualLeft;
+      var top=Math.round((sh-h)/2)+dualTop;
+      var feat='width='+w+',height='+h+',left='+Math.max(0,left)+',top='+Math.max(0,top)+
+               ',resizable=yes,scrollbars=yes,status=yes';
+      var popup=window.open(r.authorization_url,'warmwireGoogleAuth',feat);
+      if(popup&&popup.focus)popup.focus();
       document.getElementById('oauthBtnWrap').style.display='none';
       document.getElementById('oauthDone').style.display='block';
       document.getElementById('oauthEmail').textContent='Google tab mein Allow karo, phir yahan wapas aayen…';

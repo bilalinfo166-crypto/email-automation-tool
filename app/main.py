@@ -29,6 +29,30 @@ app.include_router(crm_router)
 app.include_router(scraper_router)
 
 
+@app.get("/", response_class=HTMLResponse)
+@app.get("/app", response_class=HTMLResponse)
+def serve_app():
+    """Serve the WarmWire UI from the backend so it runs on http://127.0.0.1:8000
+    instead of file://. Modern browsers block file:// pages from calling
+    http://127.0.0.1 (treated as a cross-origin/insecure request), which makes
+    the dashboard load blank. Serving from the same origin fixes that."""
+    import os
+    # Look for warmwire.html next to the app folder (the deploy location)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for candidate in [
+        os.path.join(here, "warmwire.html"),
+        os.path.join(os.path.dirname(here), "warmwire.html"),
+        "warmwire.html",
+    ]:
+        if os.path.exists(candidate):
+            with open(candidate, "r", encoding="utf-8") as f:
+                return HTMLResponse(f.read())
+    return HTMLResponse(
+        "<h2>warmwire.html not found</h2><p>Place warmwire.html next to the "
+        "app folder (in C:\\Users\\Dell\\Desktop\\files\\) and reload.</p>",
+        status_code=404)
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
