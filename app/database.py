@@ -5,7 +5,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .config import settings
 
 engine = create_engine(
-    settings.DATABASE_URL, connect_args={"check_same_thread": False}
+    settings.DATABASE_URL,
+    # timeout = how long a connection waits for a write lock before erroring
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 
 
@@ -15,7 +17,8 @@ def _sqlite_pragmas(dbapi_conn, _rec):
     try:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=8000")
+        cur.execute("PRAGMA busy_timeout=30000")   # wait up to 30s for a lock
+        cur.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, much faster
         cur.close()
     except Exception:
         pass

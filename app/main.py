@@ -56,26 +56,122 @@ def serve_app():
 @app.on_event("startup")
 def _startup():
     init_db()
-    # Recover interrupted scraper jobs (server crashed/restarted while running)
+    # ---- AUTO-RESUME after a crash / PC shutdown ----
+    # Anything that was mid-flight when the server died is picked up again
+    # automatically, so no scraping progress or pending emails are lost.
     try:
         from .database import SessionLocal
-        from .crm_models import ScraperJob, ScraperJobDomain
+        from .crm_models import ScraperJob, ScraperJobDomain, Campaign
+        from . import scraper_jobs
         db = SessionLocal()
-        # Find jobs that were "running" when server stopped
+
+        # 1) Scraper jobs that were "running" when the server stopped
         interrupted = db.query(ScraperJob).filter(ScraperJob.status == "running").all()
         for job in interrupted:
-            # Reset "scraping" domains back to "pending" so they can be re-processed
-            db.query(ScraperJobDomain).filter(
-                ScraperJobDomain.job_id == job.id,
-                ScraperJobDomain.status == "scraping"
-            ).update({"status": "pending"})
-            job.status = "stopped"  # user can click Resume
-        if interrupted:
-            db.commit()
-            print(f"Recovered {len(interrupted)} interrupted scraper job(s) — click Resume to continue.")
+            # Domains caught mid-scrape go back to "pending" so they aren't lost.
+            # Guarded per job — a lock on one must not abort the whole recovery.
+            try:
+                db.query(ScraperJobDomain).filter(
+                    ScraperJobDomain.job_id == job.id,
+                    ScraperJobDomain.status == "scraping"
+                ).update({"status": "pending"}, synchronize_session=False)
+                db.commit()
+            except Exception as je:
+                db.rollback()
+                print(f"[AutoResume] Could not requeue job #{job.id}: {je}")
+
+        for job in interrupted:
+            try:
+                remaining = db.query(ScraperJobDomain).filter(
+                    ScraperJobDomain.job_id == job.id,
+                    ScraperJobDomain.status == "pending").count()
+                if remaining == 0:
+                    job.status = "completed"
+                    db.commit()
+                    print(f"[AutoResume] Scraper job #{job.id} had nothing left — marked completed.")
+                else:
+                    # Queue them all; only ONE runs at a time so scraping never
+                    # saturates the machine and freezes the dashboard.
+                    job.status = "queued"
+                    db.commit()
+                    print(f"[AutoResume] Scraper job #{job.id} ({job.name}): "
+                          f"{remaining} domains left — queued.")
+            except Exception as je:
+                db.rollback()
+                print(f"[AutoResume] Could not queue job #{job.id}: {je}")
+
+        # Kick off the first queued job (the rest follow automatically as each ends)
+        try:
+            scraper_jobs._start_next_queued()
+        except Exception as se:
+            print(f"[AutoResume] Could not start queued job: {se}")
+
+        # 2) Campaigns that were "sending" when the server stopped
+        try:
+            from . import send_engine
+            from .crm_models import OutreachEntry
+
+            # Entries caught mid-send go back to "pending" (they were claimed but
+            # never completed). Without this they'd be stuck forever.
+            try:
+                db.query(OutreachEntry).filter(
+                    OutreachEntry.status == "sending"
+                ).update({"status": "pending"}, synchronize_session=False)
+                db.commit()
+            except Exception:
+                db.rollback()
+
+            live_camps = db.query(Campaign).filter(Campaign.status == "sending").all()
+            # Pending emails are selected by MODE, so only ONE campaign per mode
+            # may run — otherwise every email would be sent twice.
+            newest_per_mode = {}
+            for camp in live_camps:
+                cur = newest_per_mode.get(camp.mode)
+                if cur is None or camp.id > cur.id:
+                    newest_per_mode[camp.mode] = camp
+            for camp in live_camps:
+                if newest_per_mode.get(camp.mode) is not camp:
+                    camp.status = "stopped"      # older duplicates stay stopped
+                    db.commit()
+                    print(f"[AutoResume] Campaign #{camp.id} paused "
+                          f"(another campaign already covers '{camp.mode}').")
+
+            for mode_name, camp in newest_per_mode.items():
+                pending = db.query(OutreachEntry).filter(
+                    OutreachEntry.mode == camp.mode,
+                    OutreachEntry.status.in_(["pending", "queued"])).count()
+                if pending > 0:
+                    print(f"[AutoResume] Campaign #{camp.id} ({camp.name}): "
+                          f"{pending} emails pending — resuming automatically.")
+                    send_engine.start_campaign_send(
+                        campaign_id=camp.id, mode=camp.mode,
+                        emails_per_batch=camp.emails_per_batch or 10,
+                        delay_seconds=camp.delay_seconds or 30,
+                        min_delay=camp.min_delay_sec or 15,
+                        max_delay=camp.max_delay_sec or 40,
+                        sender_filter=camp.sender_emails or "",
+                        total_target=camp.total_target or 0,
+                        autopilot=bool(camp.autopilot),
+                    )
+                else:
+                    camp.status = "completed"
+                    db.commit()
+                    print(f"[AutoResume] Campaign #{camp.id} had no pending emails — completed.")
+        except Exception as ce:
+            print(f"[AutoResume] Campaign resume warning: {ce}")
+
         db.close()
     except Exception as e:
-        print(f"Job recovery warning: {e}")
+        print(f"[AutoResume] Recovery warning: {e}")
+
+    # ---- Automatic reply tracking ----
+    # Polls each sender's inbox and marks anyone who wrote back. This works on a
+    # local machine because the server connects OUT to Gmail (no public URL needed).
+    try:
+        from . import reply_tracker
+        reply_tracker.start(interval_minutes=10)
+    except Exception as e:
+        print(f"[ReplyTracker] Could not start: {e}")
 
 
 def _reset_daily(s: Sender):

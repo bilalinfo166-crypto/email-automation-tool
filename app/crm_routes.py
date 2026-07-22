@@ -405,25 +405,67 @@ def sender_history(db: Session = Depends(get_db)):
 
 @router.post("/outreach/add-from-scraper")
 def add_scraper_results_to_outreach(mode: str = "vendor", job_id: int = 0, db: Session = Depends(get_db)):
-    """Add scraped emails to outreach send list. If job_id=0, add from ALL jobs."""
+    """Add scraped emails to this mode's send list.
+
+    Safe to click ANY TIME — including while the scraper is still running.
+    Whatever has been found so far gets added; clicking again later adds only
+    the new ones. Never creates duplicates and never re-adds unsubscribed
+    addresses. Data is per-mode, so vendor/client/blog lists stay separate.
+    """
     from .crm_models import ScraperResult, ScraperJob, OutreachEntry
+
     if job_id > 0:
+        # Only allow a job that belongs to THIS mode (keeps modes separate)
+        job = db.get(ScraperJob, job_id)
+        if not job or (job.mode or "vendor") != mode:
+            return {"added": 0, "total": db.query(OutreachEntry).filter(
+                OutreachEntry.mode == mode).count(),
+                "error": "Job not found for this dashboard."}
         results = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).all()
     else:
-        # Add from ALL jobs in this mode
         job_ids = [j.id for j in db.query(ScraperJob).filter(ScraperJob.mode == mode).all()]
         results = db.query(ScraperResult).filter(ScraperResult.job_id.in_(job_ids or [-1])).all()
-    added = 0
+
+    # Load ALL existing emails for this mode in ONE query (was one query per
+    # email — far too slow for thousands of results).
+    existing = {e[0].strip().lower() for e in db.query(OutreachEntry.email).filter(
+        OutreachEntry.mode == mode).all() if e[0]}
+    # Same for the unsubscribe list — one query, not one per email. Querying per
+    # email made this endpoint hang for minutes on big lists (and it competes
+    # with the scraper for the database).
+    from .crm_models import Suppression
+    suppressed = {s[0].strip().lower() for s in db.query(Suppression.email).all() if s[0]}
+
+    added = skipped_dup = skipped_suppressed = 0
+    new_rows = []
     for r in results:
-        exists = db.query(OutreachEntry).filter(
-            OutreachEntry.mode == mode, OutreachEntry.email == r.email).first()
-        if not exists:
-            db.add(OutreachEntry(mode=mode, email=r.email, domain=r.domain,
-                email_type=r.email_type, confidence=r.confidence, source_url=r.source_url))
-            added += 1
-    db.commit()
+        email = (r.email or "").strip().lower()
+        if not email or "@" not in email:
+            continue
+        if email in existing:          # already in list (or seen earlier in this batch)
+            skipped_dup += 1
+            continue
+        if email in suppressed:        # unsubscribed — never re-add
+            skipped_suppressed += 1
+            continue
+        new_rows.append(OutreachEntry(mode=mode, email=email, domain=r.domain,
+            email_type=r.email_type, confidence=r.confidence, source_url=r.source_url))
+        existing.add(email)            # prevents duplicates within this batch too
+        added += 1
+
+    # Insert in chunks so one huge transaction doesn't hold the write lock
+    # while the scraper is running.
+    CHUNK = 500
+    for i in range(0, len(new_rows), CHUNK):
+        db.add_all(new_rows[i:i + CHUNK])
+        db.commit()
+    if not new_rows:
+        db.commit()
+
     total = db.query(OutreachEntry).filter(OutreachEntry.mode == mode).count()
-    return {"added": added, "total": total}
+    return {"added": added, "total": total,
+            "skipped_duplicates": skipped_dup,
+            "skipped_unsubscribed": skipped_suppressed}
 
 
 @router.get("/outreach/list")
@@ -847,6 +889,27 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
 
 _blog_threads = {}
 _blog_stop = {}
+
+
+@router.post("/replies/check")
+def check_replies_now(days: int = 14, db: Session = Depends(get_db)):
+    """Scan every sender's inbox now and mark anyone who replied.
+    Works locally — the server connects out to Gmail, no public URL needed."""
+    from . import reply_tracker
+    try:
+        return reply_tracker.check_replies(db, days=days)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"replies_found": 0, "error": str(e)}
+
+
+@router.get("/replies/status")
+def replies_status():
+    """Is the automatic reply checker running?"""
+    from . import reply_tracker
+    t = reply_tracker._thread
+    return {"running": bool(t is not None and t.is_alive())}
 
 
 @router.post("/blog/check-sites")
@@ -1306,15 +1369,17 @@ def blog_export(job_id: int, format: str = "csv", only_emails: bool = False,
                     result = scraper.extract_domain(link.target_domain, mode="client")
                     contacts = result.get("contacts", [])
                     if contacts:
-                        email = contacts[0].get("email", "")
+                        email = (contacts[0].get("email", "") or "").strip().lower()
                         link.email = email
                         link.email_status = "found"
-                        # Add to client send list
+                        # Add to the BLOG send list (not client — blog keeps its own).
+                        # Duplicate check must be mode-scoped too.
                         existing = bg.query(OutreachEntry).filter(
+                            OutreachEntry.mode == "blog",
                             OutreachEntry.email == email).first()
-                        if not existing:
+                        if not existing and email:
                             bg.add(OutreachEntry(
-                                mode="client", email=email, domain=link.target_domain,
+                                mode="blog", email=email, domain=link.target_domain,
                                 email_type="blog_research", confidence="medium",
                                 source_url=link.target_url, status="pending"))
                     else:

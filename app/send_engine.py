@@ -21,6 +21,9 @@ from .config import settings
 
 _send_threads = {}
 _stop_flags = {}
+# Which campaign is currently sending for each mode. Prevents two campaigns in
+# the same mode from grabbing the same pending emails (which caused duplicates).
+_sending_modes = {}
 
 
 def _get_senders(db, mode):
@@ -93,8 +96,26 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
     if max_delay < min_delay:
         max_delay = min_delay + 10
     """Start sending. sender_filter = comma-separated emails (only use these senders)."""
-    if campaign_id in _send_threads:
-        return {"error": "Campaign already sending"}
+    # Resume-safe: only refuse if a thread is ACTUALLY still alive. A stale entry
+    # from a stopped/finished campaign is cleaned up so resume works.
+    existing = _send_threads.get(campaign_id)
+    if existing is not None:
+        if existing.is_alive():
+            return {"error": "Campaign already sending"}
+        # Dead/finished thread left an entry — clear it so we can resume
+        _send_threads.pop(campaign_id, None)
+    _stop_flags.pop(campaign_id, None)  # clear any old stop flag before resuming
+
+    # CRITICAL: only ONE campaign per mode may send at a time. Pending emails are
+    # selected by MODE, so two campaigns running together would both grab the same
+    # emails and send every message twice.
+    other = _sending_modes.get(mode)
+    if other and other != campaign_id:
+        t_other = _send_threads.get(other)
+        if t_other is not None and t_other.is_alive():
+            return {"error": f"Campaign #{other} is already sending for '{mode}'. "
+                             f"Stop it first."}
+    _sending_modes[mode] = campaign_id
 
     def _run():
         # Wait for scheduled time
@@ -162,6 +183,22 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 if stop_flag["stop"]:
                     print(f"[SendEngine] Campaign #{campaign_id} manually stopped.")
                     break
+
+                # ATOMIC CLAIM — the single most important duplicate guard.
+                # Flip this row pending/queued -> "sending" in ONE SQL statement.
+                # If it updates 0 rows, someone else already took it, so skip.
+                # This makes double-sends impossible even if two loops overlap.
+                try:
+                    claimed = db.query(OutreachEntry).filter(
+                        OutreachEntry.id == entry.id,
+                        OutreachEntry.status.in_(["pending", "queued"])
+                    ).update({"status": "sending"}, synchronize_session=False)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    claimed = 0
+                if not claimed:
+                    continue  # already claimed/sent by someone else — skip it
 
                 # Pick a sender that still has daily capacity (round-robin among available)
                 sender = None
@@ -319,6 +356,9 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             db.close()
             _send_threads.pop(campaign_id, None)
             _stop_flags.pop(campaign_id, None)
+            # Release this mode so another campaign may send later
+            if _sending_modes.get(mode) == campaign_id:
+                _sending_modes.pop(mode, None)
 
     t = threading.Thread(target=_run, daemon=True)
     _send_threads[campaign_id] = t

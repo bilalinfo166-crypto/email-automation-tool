@@ -30,9 +30,23 @@ _threads: dict[int, threading.Thread] = {}
 _stop_flags: dict[int, bool] = {}
 
 
+# Total worker budget shared across ALL running jobs. Kept modest on purpose:
+# the same machine also serves the web UI, and saturating the CPU/network makes
+# the dashboard unresponsive.
+TOTAL_WORKER_BUDGET = 30
+
+
 def _calc_workers(total_domains: int) -> int:
-    """50 workers at all times."""
-    return 50
+    """Adaptive workers: split the shared budget across all running jobs so
+    multiple dashboards can scrape simultaneously without overloading.
+      1 job  -> up to 50 workers
+      2 jobs -> ~30 each
+      3 jobs -> ~20 each
+    Never fewer than 10 so each job still makes steady progress."""
+    running = max(1, len([t for t in _threads.values() if t.is_alive()]))
+    per_job = max(10, min(50, TOTAL_WORKER_BUDGET // running))
+    # Don't spin up more workers than there are domains to process
+    return min(per_job, max(1, total_domains))
 
 
 def _check_resources() -> float:
@@ -191,96 +205,120 @@ def _run(job_id: int):
         limit = job.max_per_domain or 2
         mode = job.mode or "vendor"
 
-        # Track retry counts per domain_id
-        retry_count = {}
+        # Total domains in this job (for worker sizing + retry policy)
+        total_domains = db.query(ScraperJobDomain).filter(
+            ScraperJobDomain.job_id == job_id).count()
+        # Retry ROUNDS that run AFTER the main pass finishes (big jobs get fewer)
+        max_retry_rounds = 1 if total_domains > 1000 else 2
 
-        pending_ids = deque(
-            jd.id for jd in db.query(ScraperJobDomain.id)
-            .filter(ScraperJobDomain.job_id == job_id, ScraperJobDomain.status == "pending").all()
-        )
-        if not pending_ids:
-            job.status = "completed"; db.commit(); return
-
-        # Dynamic concurrency based on total domains + server resources
-        total = len(pending_ids)
-        workers = _effective_workers(total)
-        print(f"[WarmWire] Job #{job_id}: {total} domains → {workers} workers")
-
+        workers = _effective_workers(total_domains)
+        print(f"[WarmWire] Job #{job_id}: {total_domains} domains → {workers} workers")
         pool = ThreadPoolExecutor(max_workers=workers)
-        futures = {}
 
-        def _submit_next():
-            while pending_ids:
-                did = pending_ids.popleft()
-                jd = db.get(ScraperJobDomain, did)
-                if not jd or jd.status not in ("pending","failed","no_email"): continue
-                jd.status = "scraping"; jd.last_checked = datetime.utcnow()
-                db.commit()
-                fut = pool.submit(_scrape_with_retry, jd.domain, mode)
-                futures[fut] = did
-                return True
-            return False
-
-        # Fill pool
-        for _ in range(min(workers, len(pending_ids))):
-            _submit_next()
-
-        max_retries = 1 if total > 1000 else (2 if total > 200 else MAX_RETRIES)
-        completed_since_update = 0
-        update_every = 10 if total > 500 else 3
-
-        while futures:
-            done_fut = next(iter(as_completed(futures)))
-            did = futures.pop(done_fut)
-
-            # INSTANT STOP: check the in-memory flag on every single domain.
-            # This makes Stop take effect immediately, not after a batch.
-            if _stop_flags.get(job_id):
-                pool.shutdown(wait=False, cancel_futures=True)
-                db.refresh(job)
-                job.status = "stopped"; db.commit()
-                break
-
+        def _refresh_counters():
+            """Update done / emails_found. 'done' now only ever moves FORWARD,
+            because failed domains are no longer pushed back to 'pending'
+            mid-run (that made the progress bar stall / go backwards)."""
             try:
-                jd = db.get(ScraperJobDomain, did)
-                if jd:
-                    try:
-                        result = done_fut.result()
-                    except Exception:
-                        result = {"contacts":[],"status":"error","vendor_signals":{}}
-                    _save_result(db, job, jd, result, limit)
-                    db.commit()  # ALWAYS commit so emails appear immediately
-
-                    if jd.status in ("failed","no_email"):
-                        rc = retry_count.get(did, 0) + 1
-                        retry_count[did] = rc
-                        if rc < max_retries:
-                            jd.status = "pending"; jd.error = ""
-                            db.commit()
-                            pending_ids.append(did)
+                job.done = (db.query(ScraperJobDomain)
+                            .filter(ScraperJobDomain.job_id == job_id,
+                                    ScraperJobDomain.status.in_(["completed", "failed", "no_email"]))
+                            .count())
+                job.emails_found = db.query(ScraperResult).filter(
+                    ScraperResult.job_id == job_id).count()
+                job.updated_at = datetime.utcnow()
+                db.commit()
             except Exception:
                 pass
 
-            completed_since_update += 1
+        stopped = False
 
-            # Heavy counter queries only every N completions (fast)
-            if completed_since_update >= update_every:
-                try:
+        # ROUND 0 = main pass over every pending domain.
+        # ROUND 1+ = retry the ones that errored, only AFTER the main pass is done.
+        for round_no in range(0, max_retry_rounds + 1):
+            if stopped:
+                break
+            if round_no == 0:
+                ids = [r[0] for r in db.query(ScraperJobDomain.id).filter(
+                    ScraperJobDomain.job_id == job_id,
+                    ScraperJobDomain.status == "pending").all()]
+                label = "main pass"
+            else:
+                # Only retry real ERRORS. "no_email" means we checked fine and
+                # the site simply has no address — re-scraping rarely helps and
+                # would double the work on big lists.
+                ids = [r[0] for r in db.query(ScraperJobDomain.id).filter(
+                    ScraperJobDomain.job_id == job_id,
+                    ScraperJobDomain.status == "failed").all()]
+                label = f"retry round {round_no}"
+            if not ids:
+                continue
+            print(f"[WarmWire] Job #{job_id}: {label} — {len(ids)} domains")
+
+            pending_ids = deque(ids)
+            futures = {}
+
+            def _submit_next():
+                while pending_ids:
+                    did = pending_ids.popleft()
+                    jd = db.get(ScraperJobDomain, did)
+                    if not jd:
+                        continue
+                    jd.status = "scraping"; jd.last_checked = datetime.utcnow()
+                    db.commit()
+                    fut = pool.submit(_scrape_with_retry, jd.domain, mode)
+                    futures[fut] = did
+                    return True
+                return False
+
+            for _ in range(min(workers, len(pending_ids))):
+                _submit_next()
+
+            completed_since_update = 0
+            update_every = 10 if len(ids) > 500 else 3
+
+            while futures:
+                done_fut = next(iter(as_completed(futures)))
+                did = futures.pop(done_fut)
+
+                # INSTANT STOP: checked on every single domain.
+                if _stop_flags.get(job_id):
+                    pool.shutdown(wait=False, cancel_futures=True)
                     db.refresh(job)
-                    if job.status == "stopped":
-                        pool.shutdown(wait=False, cancel_futures=True)
-                        break
-                    job.done = (db.query(ScraperJobDomain)
-                                .filter(ScraperJobDomain.job_id == job_id,
-                                        ScraperJobDomain.status.in_(["completed","failed","no_email"]))
-                                .count())
-                    job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
-                    job.updated_at = datetime.utcnow(); db.commit()
+                    job.status = "stopped"; db.commit()
+                    stopped = True
+                    break
+
+                try:
+                    jd = db.get(ScraperJobDomain, did)
+                    if jd:
+                        try:
+                            result = done_fut.result()
+                        except Exception:
+                            result = {"contacts": [], "status": "error", "vendor_signals": {}}
+                        _save_result(db, job, jd, result, limit)
+                        db.commit()  # commit so emails appear immediately
+                        # NOTE: failed domains are deliberately NOT requeued here.
+                        # They're handled in a retry round after the main pass.
                 except Exception:
                     pass
-                completed_since_update = 0
 
-            _submit_next()
+                completed_since_update += 1
+                if completed_since_update >= update_every:
+                    try:
+                        db.refresh(job)
+                        if job.status == "stopped":
+                            pool.shutdown(wait=False, cancel_futures=True)
+                            stopped = True
+                            break
+                        _refresh_counters()
+                    except Exception:
+                        pass
+                    completed_since_update = 0
+
+                _submit_next()
+
+            _refresh_counters()
 
         db.refresh(job)
         if job.status != "stopped":
@@ -303,6 +341,28 @@ def _run(job_id: int):
     finally:
         db.close()
         _threads.pop(job_id, None)
+        _start_next_queued(job_id)
+
+
+def _start_next_queued(finished_job_id: int = 0):
+    """Start the next job waiting in the queue. Jobs run ONE AT A TIME so a big
+    scrape can't saturate the machine and make the dashboard unresponsive."""
+    try:
+        # Someone still running? Then don't start another.
+        if any(t.is_alive() for jid, t in _threads.items() if jid != finished_job_id):
+            return
+        s = SessionLocal()
+        try:
+            nxt = (s.query(ScraperJob)
+                   .filter(ScraperJob.status == "queued")
+                   .order_by(ScraperJob.id).first())
+            if nxt:
+                print(f"[WarmWire] Starting queued job #{nxt.id} ({nxt.name})")
+                start(nxt.id)
+        finally:
+            s.close()
+    except Exception as e:
+        print(f"[WarmWire] Could not start next queued job: {e}")
 
 
 def start(job_id: int):
@@ -326,11 +386,29 @@ def stop(db, job_id: int):
 
 
 def resume(db, job_id: int):
+    """Resume a job. Works for stopped/queued jobs AND for orphaned jobs whose
+    DB status still says "running" because the PC/server died mid-run (the
+    thread is gone but the status was never updated)."""
     _stop_flags.pop(job_id, None)  # clear any stale stop flag
     job = db.get(ScraperJob, job_id)
-    if job and job.status in ("stopped", "queued"):
-        job.status = "running"; db.commit()
-        start(job_id)
+    if not job:
+        return None
+
+    # Already genuinely running with a live thread? Nothing to do.
+    t = _threads.get(job_id)
+    if t is not None and t.is_alive():
+        return job
+
+    # Requeue any domains that were mid-scrape when the job died, otherwise
+    # they'd be stuck in "scraping" forever and silently skipped.
+    db.query(ScraperJobDomain).filter(
+        ScraperJobDomain.job_id == job_id,
+        ScraperJobDomain.status == "scraping"
+    ).update({"status": "pending"}, synchronize_session=False)
+
+    job.status = "running"
+    db.commit()
+    start(job_id)
     return job
 
 

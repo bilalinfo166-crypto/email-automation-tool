@@ -2244,8 +2244,31 @@ document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>{
   if(v==='templates') loadTemplates();
   if(v==='analytics') loadAnalytics();
   if(v==='blogresearch') loadBlogJobs();
+  if(v==='prospecting') loadLatestScraperJob();
   if(v==='overview') { loadRealSenders(); loadRealDashboard(); }
 }));
+
+// When the Email Scraper tab opens (or after a page refresh), reload the most
+// recent job so its progress bar, LIVE DOMAIN STATUS and emails come back
+// instead of a blank panel.
+function loadLatestScraperJob(){
+  apiCall('/crm/scraper/jobs?mode='+apiMode()).then(function(jobs){
+    if(!jobs || !jobs.length) return;
+    var job=jobs[0];               // newest job first
+    if(!job) return;
+    scrJobId=job.id;
+    // These panels start hidden — show them so live domain processing is visible
+    var pc=document.getElementById('scrProgressCard');
+    var dc=document.getElementById('scrDomCard');
+    if(pc) pc.style.display='block';
+    if(dc) dc.style.display='block';
+    pollScraper();                 // draw current state immediately
+    if(job.status==='running'){    // still running -> resume live polling
+      if(scrTimer)clearInterval(scrTimer);
+      scrTimer=setInterval(pollScraper,1500);
+    }
+  }).catch(function(){});
+}
 
 // ===== AUTH + ONBOARDING =====
 let authMode='login', account={profile:null}, authed=false, profileDone=false, mode=null;
@@ -2362,6 +2385,8 @@ function enterApp(){
 }
 function applyMode(m){
   mode=m;
+  // Persist so a page refresh reopens the SAME dashboard (not a stale one)
+  try{ localStorage.setItem('ww_mode', m); }catch(e){}
   const vendor = m==='vendor';
   const isBlog = m==='blog';
   const label = isBlog?'Blog Research':(vendor?'Vendor':'Client');
@@ -2387,6 +2412,7 @@ function applyMode(m){
     titles.prospecting=['Email Scraper','Scrape emails from any domains'];
     titles.analytics=['Analytics','Blog Research performance · live'];
     // Jump to blog research view as the starting point.
+    reloadForMode();
     setTimeout(function(){ var bn=document.getElementById('navBlogResearch'); if(bn) bn.click(); },50);
     return;
   }
@@ -2410,10 +2436,50 @@ function applyMode(m){
       document.getElementById('pageSub').textContent=titles[v][1];
     }
   });
+  reloadForMode();
+}
+
+// Switching dashboards must refetch everything for the new mode, otherwise the
+// screen keeps showing the previous mode's data (vendor showing client's rows).
+// Deferred to the next tick so every variable is initialised, and each call is
+// guarded so one failure can never blank the rest of the dashboard.
+// NOTE: we deliberately do NOT wipe rows first — each loader replaces its own
+// rows when its data arrives. Clearing separately caused a race that could
+// leave panels empty.
+function reloadForMode(){
+  setTimeout(function(){
+    // Scraper jobs belong to one mode only — reset its live tracking
+    try{
+      if(typeof scrTimer!=='undefined' && scrTimer){ clearInterval(scrTimer); scrTimer=null; }
+      if(typeof scrContacts!=='undefined') scrContacts=[];
+      if(typeof scrJobId!=='undefined') scrJobId=null;
+      var pc=document.getElementById('scrProgressCard'); if(pc) pc.style.display='none';
+      var dc=document.getElementById('scrDomCard'); if(dc) dc.style.display='none';
+      var sr=document.getElementById('scrRows'); if(sr) sr.innerHTML='';
+      var dr=document.getElementById('scrDomRows'); if(dr) dr.innerHTML='';
+      var cn=document.getElementById('scrCount'); if(cn) cn.textContent='0 contacts';
+    }catch(e){}
+
+    // Refetch every panel for the new mode (each is independent + guarded)
+    try{ loadRealDashboard(); }catch(e){}   // also loads the send list
+    try{ loadRealSenders(); }catch(e){}
+    try{ loadSenderLog(); }catch(e){}
+    try{ renderCampaigns(); }catch(e){}
+    try{ loadTemplates(); }catch(e){}
+    try{ loadAnalytics(); }catch(e){}
+    try{ loadRealWarmup(); }catch(e){}
+    try{ loadLatestScraperJob(); }catch(e){}
+    if(mode==='blog'){ try{ loadBlogJobs(); }catch(e){} }
+  },0);
 }
 
 // ===== EMAIL SCRAPER (REAL BACKEND) =====
-const API_BASE='http://127.0.0.1:8000';
+// Talk to the SAME host/port the page was served from. That way the app works
+// on any port (8000, 8080, ...) and on a deployed domain, without editing code.
+// Falls back to 127.0.0.1:8000 only when opened directly as a file://.
+const API_BASE = (location.protocol === 'http:' || location.protocol === 'https:')
+  ? location.origin
+  : 'http://127.0.0.1:8000';
 async function apiCall(path,method,body){
   const opt={method:method||'GET',headers:{'Content-Type':'application/json'}};
   if(body)opt.body=JSON.stringify(body);
