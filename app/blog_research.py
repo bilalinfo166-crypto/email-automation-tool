@@ -79,7 +79,20 @@ SKIP_BRANDS = {
     "wordpress", "shopify", "etsy", "bbc", "cnn", "forbes", "reuters",
     "bloomberg", "theguardian", "nytimes", "wikihow", "indeed", "glassdoor",
     "flipkart", "target", "bestbuy", "wikimedia", "wiktionary", "quora",
+    # reference / big media / platforms — none of these buy guest posts
+    "wikidata", "wikivoyage", "wikisource", "britannica", "dictionary",
+    "investopedia", "healthline", "webmd", "mayoclinic", "medium",
+    "substack", "blogspot", "tumblr", "github", "gitlab", "stackoverflow",
+    "stackexchange", "mozilla", "w3schools", "cloudflare", "adobe", "canva",
+    "zoom", "slack", "notion", "figma", "hubspot", "salesforce", "wix",
+    "squarespace", "godaddy", "statista", "gartner", "mckinsey",
+    "usatoday", "washingtonpost", "wsj", "cnbc", "foxnews", "nbcnews",
+    "buzzfeed", "huffpost", "businessinsider", "techcrunch", "theverge",
+    "wired", "engadget", "mashable", "vice", "vox", "msn",
 }
+
+# Whole TLDs that are never guest-post buyers
+SKIP_TLDS = {"gov", "mil", "edu", "int"}
 
 TIME_RANGES = {
     "24h": timedelta(hours=24), "3d": timedelta(days=3), "1w": timedelta(weeks=1),
@@ -123,18 +136,24 @@ def check_site(site):
                         "It doesn't accept guest posts and has no standard sitemap. "
                         "Target smaller niche blogs instead (the kind that publish sponsored/guest articles)."}
 
-    # Can we even reach it?
+    # Can we even reach it? This is only a sanity check before the real run, so
+    # it uses short timeouts and few requests — a slow check that makes the user
+    # wait minutes is worse than no check at all.
+    # Sites are checked in parallel, so a generous timeout costs nothing overall
+    # — and it stops a merely-slow site being reported as dead.
     base = "https://" + root
-    html = _fetch(base) or _fetch("http://" + root)
+    html = _fetch(base, timeout=10)
+    if not html:
+        html = _fetch("http://" + root, timeout=8)
     if not html:
         return {"ok": False, "reason": "unreachable",
                 "hint": f"Couldn't load '{bare}'. It may be down, blocking bots, or behind heavy protection."}
 
-    # Does it have ANY sitemap? (best signal it's a real, crawlable blog)
+    # Does it have a sitemap? (best signal it's a real, crawlable blog)
+    # Two probes is enough here — the real run tries every variant.
     has_sitemap = False
-    for sm in ["/sitemap.xml", "/sitemap_index.xml", "/post-sitemap.xml",
-               "/wp-sitemap.xml", "/news-sitemap.xml"]:
-        if _fetch(base + sm):
+    for sm in ["/sitemap.xml", "/post-sitemap.xml"]:
+        if _fetch(base + sm, timeout=6):
             has_sitemap = True
             break
 
@@ -193,7 +212,35 @@ def _is_skip(domain):
         first = parts[0]
         if first in SKIP_BRANDS:
             return True
+    # 3) Check EVERY label, not just the first — "en.wiktionary.org" was
+    #    slipping through because only "en" was being tested.
+    for label in parts[:-1]:
+        if label in SKIP_BRANDS:
+            return True
+    # 4) Whole TLDs that never buy guest posts
+    if parts and parts[-1] in SKIP_TLDS:
+        return True
+    if len(parts) >= 2 and parts[-2] == "gov":     # gov.uk, gov.au ...
+        return True
+    # 5) Never offer back a site we're currently researching — it's the source,
+    #    not a client.
+    for src in _SOURCE_SITES:
+        if d == src or d.endswith("." + src):
+            return True
     return False
+
+
+# Sites currently being researched. Links pointing back at them are ignored.
+_SOURCE_SITES = set()
+
+
+def set_source_sites(sites):
+    """Tell the extractor which domains are being researched."""
+    _SOURCE_SITES.clear()
+    for s in sites or []:
+        r = _root(s).replace("www.", "").lower()
+        if r:
+            _SOURCE_SITES.add(r)
 
 
 def _decode_body(r):
@@ -340,12 +387,25 @@ def _date_from_html(html):
         d = _parse_date(m.group(1))
         if d:
             return d
-    # 3) <time datetime="2020-...">
-    m = re.search(r'<time[^>]*datetime=["\']([^"\']+)["\']', html, re.I)
-    if m:
-        d = _parse_date(m.group(1))
-        if d:
-            return d
+    # 3) <time> — but ONLY when the tag clearly marks the article's own publish
+    #    date. Taking the first <time> on the page was a real bug: sidebars,
+    #    "recent posts" widgets, comments and footers all contain <time> tags,
+    #    usually with OLD dates. A fresh article next to a 2018 widget was being
+    #    judged as 2018 and thrown away before its links were ever read.
+    for pat in [
+        r'<time[^>]*itemprop=["\']datePublished["\'][^>]*datetime=["\']([^"\']+)["\']',
+        r'<time[^>]*datetime=["\']([^"\']+)["\'][^>]*itemprop=["\']datePublished["\']',
+        r'<time[^>]*\bpubdate\b[^>]*datetime=["\']([^"\']+)["\']',
+        r'<time[^>]*class=["\'][^"\']*(?:published|entry-date|post-date|posted-on)[^"\']*["\'][^>]*datetime=["\']([^"\']+)["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m:
+            d = _parse_date(m.group(1))
+            if d:
+                return d
+
+    # No trustworthy date. Return None so the caller KEEPS the article and reads
+    # its links — dropping a page on a guess is how good prospects get missed.
     return None
 
 
@@ -360,6 +420,15 @@ def _is_cloudflare_blocked(html):
              or "attention required" in low))
 
 
+# Publish date read out of each article's own HTML, used when the sitemap
+# didn't provide one.
+_last_article_date = {}
+
+# Which section each article was found under, filled by the most recent
+# _find_articles() call and read by research_site().
+_last_categories = {}
+
+
 def _find_articles(site, max_articles=30, time_range="1m"):
     """Find recent article URLs from a blog site within the time range.
     Prefers sitemap (real dated posts, newest-first). Filters out articles
@@ -368,6 +437,7 @@ def _find_articles(site, max_articles=30, time_range="1m"):
     base = "https://" + root
     articles = []  # list of (url, date_str)
     seen = set()
+    article_category = {}   # article url -> the section it was found under
 
     # Date cutoff: articles older than this are skipped
     delta = TIME_RANGES.get(time_range, timedelta(days=30))
@@ -450,36 +520,134 @@ def _find_articles(site, max_articles=30, time_range="1m"):
             if len(articles) >= max_articles:
                 break
 
-    # 2. HOMEPAGE FALLBACK — only if sitemap gave little
-    if len(articles) < 5:
-        html = _fetch(base) or _fetch("http://" + root)
-        if html:
+    # 2. THE SITE ITSELF — homepage + blog/news sections.
+    # Always done, not just as a fallback. A blog's newest posts are on its
+    # front page by definition, so this catches anything the sitemap missed
+    # (stale sitemap, no sitemap, or one that's blocked).
+    # Whole path SEGMENTS that mean "this is a listing or utility page".
+    # Matched as complete segments, never as substrings — otherwise a genuine
+    # article like /what-you-should-know-about-seo would be thrown away just
+    # for containing the word "about".
+    NON_ARTICLE_SEGMENTS = {
+        "tag", "tags", "category", "categories", "author", "authors", "page",
+        "feed", "rss", "comments", "search", "contact", "contact-us", "about",
+        "about-us", "privacy", "privacy-policy", "terms", "advertise",
+        "sitemap", "disclaimer", "subscribe", "newsletter", "login", "signin",
+        "register", "signup", "cart", "checkout", "account", "wp-admin",
+        "wp-content", "wp-includes", "shop", "store", "pricing",
+    }
+    BAD_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".css", ".js",
+               ".pdf", ".xml", ".zip", ".mp4", ".mp3")
+
+    def _looks_like_article(path):
+        """Is this URL a post rather than a listing page?"""
+        low = path.lower().rstrip("/")
+        if low.endswith(BAD_EXT):
+            return False
+        segments = [seg for seg in low.split("/") if seg]
+        if any(seg in NON_ARTICLE_SEGMENTS for seg in segments):
+            return False
+        if any(seg.startswith("wp-") for seg in segments):
+            return False
+        last = path.rstrip("/").split("/")[-1]
+        if not last or len(last) < 8:
+            return False
+        # /2026/07/16/some-story  — a date in the path is a strong signal
+        if _date_from_url("/" + path):
+            return True
+        # descriptive slug: several words joined by hyphens
+        if last.count("-") >= 2 and len(last) > 14:
+            return True
+        # deep path with a wordy last segment (e.g. /news/business/some-story)
+        if path.count("/") >= 2 and last.count("-") >= 1 and len(last) > 12:
+            return True
+        return False
+
+    def _harvest(page_url):
+        """Pull article links out of one listing page."""
+        html = _fetch(page_url, timeout=8)
+        if not html:
+            return 0
+        got = 0
+        try:
             soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True):
-                full = urljoin(base, a["href"])
+        except Exception:
+            return 0
+        for a in soup.find_all("a", href=True):
+            full = urljoin(page_url, a["href"])
+            if _root(full) != root:
+                continue
+            path = urlparse(full).path.strip("/")
+            if not path or not _looks_like_article(path):
+                continue
+            before = len(articles)
+            _add(full)          # date is checked inside _add
+            if len(articles) > before:
+                got += 1
+            if len(articles) >= max_articles:
+                break
+        return got
+
+    def _find_category_pages(page_url):
+        """Read the site's own navigation and return its category/section pages.
+
+        Rather than guessing which sections a site has, this takes them from the
+        menu the site actually shows (CELEBRITY, TECH, BUSINESS, NEWS ...).
+        """
+        html = _fetch(page_url, timeout=8)
+        if not html:
+            return []
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return []
+        cats, seen_cat = [], set()
+        # Prefer real navigation, fall back to the whole page
+        areas = soup.find_all(["nav", "header"]) or [soup]
+        for area in areas:
+            for a in area.find_all("a", href=True):
+                full = urljoin(page_url, a["href"]).split("#")[0].rstrip("/")
                 if _root(full) != root:
                     continue
                 path = urlparse(full).path.strip("/")
-                if not path:
+                if not path or full in seen_cat:
                     continue
-                low = path.lower()
-                # Reject non-article pages: categories, tags, homepage sections,
-                # advertise/press/about pages etc.
-                if any(x in low for x in ["/tag/", "tag/", "/category/", "category/",
-                                          "/author/", "author/", "/page/", "page/",
-                                          "/wp-", "/feed", "feed/", "contact", "about",
-                                          "privacy", "terms", "advertise", "press-release",
-                                          "press-releases", "sitemap", "disclaimer",
-                                          "subscribe", "newsletter", "login", "register",
-                                          ".jpg", ".png", ".css", ".js", ".pdf"]):
+                segs = [x for x in path.lower().split("/") if x]
+                if not segs or len(segs) > 2:
                     continue
-                last = path.split("/")[-1]
-                # Real articles have descriptive slugs (multiple hyphens, longer text)
-                looks_like_article = (last.count("-") >= 3 and len(last) > 25)
-                if looks_like_article:
-                    _add(full)  # homepage links have no lastmod; URL date checked inside
-                if len(articles) >= max_articles:
-                    break
+                # skip utility pages — they list no articles
+                if segs[-1] in NON_ARTICLE_SEGMENTS and segs[0] != "category":
+                    continue
+                label = (a.get_text(strip=True) or segs[-1]).strip()
+                if not label or len(label) > 30:
+                    continue
+                seen_cat.add(full)
+                cats.append((full, label))
+        return cats[:14]          # a sane cap
+
+    if len(articles) < max_articles:
+        # 1) the obvious listing pages
+        listing_pages = [(base, ""), (base + "/blog", "Blog"), (base + "/news", "News"),
+                         (base + "/articles", "Articles"), (base + "/insights", "Insights"),
+                         (base + "/resources", "Resources"), (base + "/posts", "Posts")]
+        # 2) plus every section the site lists in its own menu
+        try:
+            listing_pages += _find_category_pages(base)
+        except Exception:
+            pass
+
+        for page_url, label in listing_pages:
+            if len(articles) >= max_articles:
+                break
+            try:
+                before = set(u for u, _ in articles)
+                _harvest(page_url)
+                # remember which section each new article came from
+                for u, _d in articles:
+                    if u not in before and u not in article_category:
+                        article_category[u] = label or "Home"
+            except Exception:
+                continue
 
     # 3. SAFETY NET — if the date filter dropped EVERYTHING but the sitemap did
     # have posts, take the newest ones anyway (better to show recent posts than
@@ -496,6 +664,8 @@ def _find_articles(site, max_articles=30, time_range="1m"):
             if len(articles) >= max_articles:
                 break
 
+    _last_categories.clear()
+    _last_categories.update(article_category)
     return articles[:max_articles]
 
 
@@ -512,19 +682,19 @@ def _extract_external_links(article_url, cutoff=None):
     root = _root(article_url)
     html = _fetch(article_url)
     if not html:
-        return []
+        return [], "unreachable"
 
     # Cloudflare rate-limit / access-denied page — no real content, skip quietly
     if _is_cloudflare_blocked(html):
-        print(f"[BlogResearch]   (cloudflare blocked) {article_url}")
-        return []
+        return [], "blocked"
 
     # FINAL date safety net: if the article's HTML says it's older than the
     # cutoff, drop it — even if sitemap/URL gave no date.
-    if cutoff is not None:
-        pub = _date_from_html(html)
-        if pub is not None and pub < cutoff:
-            return []
+    pub = _date_from_html(html)
+    if cutoff is not None and pub is not None and pub < cutoff:
+        return [], "too_old"
+    # remembered so the caller can show a date even when the sitemap had none
+    _last_article_date[article_url] = pub.strftime("%Y-%m-%d") if pub else ""
     soup = BeautifulSoup(html, "html.parser")
 
     # 1) Strip structural chrome — nav/header/footer/sidebar aren't article links
@@ -550,10 +720,23 @@ def _extract_external_links(article_url, cutoff=None):
         s = " ".join(val) if isinstance(val, list) else str(val)
         s = s.lower()
         return any(w in s for w in JUNK_WORDS)
-    for tag in soup.find_all(attrs={"class": _is_junk_class}):
-        tag.decompose()
-    for tag in soup.find_all(attrs={"id": _is_junk_class}):
-        tag.decompose()
+
+    # NEVER strip these — they wrap the whole page. WordPress routinely puts
+    # classes like "sidebar-right" or "comments-open" on <body>, and matching
+    # those was deleting the entire document, so no links were ever found.
+    STRUCTURAL = {"html", "body", "main", "article"}
+
+    def _strip(attr):
+        for tag in soup.find_all(attrs={attr: _is_junk_class}):
+            if tag.name in STRUCTURAL:
+                continue
+            # A "junk" block that holds most of the page isn't junk — it's the
+            # content wrapper with an unlucky class name.
+            if len(tag.find_all("a", href=True)) > 0 and tag.find("article"):
+                continue
+            tag.decompose()
+    _strip("class")
+    _strip("id")
     # Also strip anything explicitly marked as an ad region
     for tag in soup.find_all(attrs={"data-ad": True}):
         tag.decompose()
@@ -606,18 +789,26 @@ def _extract_external_links(article_url, cutoff=None):
 
     links = _collect(body)
 
-    # FALLBACK: if the chosen container gave nothing but the page clearly has
-    # external links elsewhere, re-scan the whole cleaned page. This handles
-    # sites whose content isn't in a recognized container. Structural chrome
-    # (nav/header/footer) was already stripped above, so this stays clean.
+    # FALLBACK 1: the chosen container gave nothing — re-scan the cleaned page.
     if not links and body is not soup:
         links = _collect(soup)
 
-    return links
+    # FALLBACK 2: cleaning removed too much (an unlucky class name on a wrapper).
+    # Re-parse the ORIGINAL html, drop only obvious chrome, and look again. This
+    # guarantees over-eager cleaning can never zero out a page that really does
+    # have outbound links.
+    if not links:
+        raw = BeautifulSoup(html, "html.parser")
+        for t in raw.find_all(["nav", "header", "footer", "aside", "form",
+                               "script", "style", "button"]):
+            t.decompose()
+        links = _collect(raw)
+
+    return links, ("ok" if links else "no_links")
 
 
 def research_site(site, time_range="1m", max_articles=30, workers=10,
-                  on_article=None, on_link=None, should_stop=None):
+                  on_article=None, on_link=None, should_stop=None, on_stats=None):
     """Research one blog site: find articles, extract external links.
     Articles processed in PARALLEL (10 workers). Live callbacks:
       on_article(article_url, count) — as each article is opened
@@ -626,7 +817,8 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
     results = []
     if should_stop and should_stop():
         return results
-    article_pairs = _find_articles(site, max_articles, time_range)  # list of (url, date)
+    article_pairs = _find_articles(site, max_articles, time_range)
+    categories = dict(_last_categories)   # snapshot before the next site runs  # list of (url, date)
     global_seen_domains = set()
     counter = [0]
 
@@ -634,11 +826,16 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
     delta = TIME_RANGES.get(time_range, timedelta(days=30))
     cutoff = datetime.utcnow() - delta
 
+    # Why articles produced nothing — so "0 links" can be explained
+    stats = {"ok": 0, "no_links": 0, "too_old": 0, "unreachable": 0,
+             "blocked": 0, "stopped": 0}
+
     def _do_article(pair):
         article, date_str = pair
         if should_stop and should_stop():
-            return (article, date_str, [])
-        return (article, date_str, _extract_external_links(article, cutoff))
+            return (article, date_str, [], "stopped")
+        links, reason = _extract_external_links(article, cutoff)
+        return (article, date_str, links, reason)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_do_article, p) for p in article_pairs]
@@ -649,8 +846,13 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
                     f.cancel()
                 break
             try:
-                article, date_str, links = fut.result()
+                article, date_str, links, reason = fut.result()
             except Exception:
+                continue
+            stats[reason] = stats.get(reason, 0) + 1
+            # An article outside the chosen time range was never really
+            # "processed" — don't count it, or the numbers mislead.
+            if reason == "too_old":
                 continue
             counter[0] += 1
             if on_article:
@@ -662,6 +864,9 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
                 d = _parse_date(date_str)
                 if d:
                     pub_date = d.strftime("%Y-%m-%d")
+            if not pub_date:
+                # no sitemap date — use the date printed in the article itself
+                pub_date = _last_article_date.get(article, "")
             for target_domain, target_url in links:
                 if target_domain in global_seen_domains:
                     continue
@@ -672,11 +877,20 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
                     "target_domain": target_domain,
                     "target_url": target_url,
                     "published_date": pub_date,
+                    "category": categories.get(article, ""),
                 }
                 results.append(link_data)
                 if on_link:
                     try: on_link(link_data)
                     except Exception: pass
+
+    print(f"[BlogResearch] {_root(site)}: {stats['ok']} article(s) with links, "
+          f"{stats['no_links']} with none, {stats['too_old']} outside the time range, "
+          f"{stats['unreachable']} unreachable, {stats['blocked']} blocked "
+          f"-> {len(results)} prospect(s)")
+    if isinstance(on_stats, dict):
+        for k, v in stats.items():
+            on_stats[k] = on_stats.get(k, 0) + v
     return results
 
 

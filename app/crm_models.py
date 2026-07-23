@@ -166,6 +166,19 @@ class OutreachEntry(Base):
     sender_email: Mapped[str] = mapped_column(String, default="")  # which sender sent this
     subject: Mapped[str] = mapped_column(String, default="")
     unsub_token: Mapped[str] = mapped_column(String, default="", index=True)  # unique per-email unsubscribe token
+    # Follow-up reminders (sent only if there's still no reply)
+    followup_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_followup_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    # Gmail labelling: how we find the sent copy, and which label it should carry
+    # Where we found this prospect (blog research): the site that linked to them
+    # and the exact article — used to personalise the pitch.
+    ref_site: Mapped[str] = mapped_column(String, default="")
+    ref_article: Mapped[str] = mapped_column(String, default="")
+    ref_title: Mapped[str] = mapped_column(String, default="")
+    message_id: Mapped[str] = mapped_column(String, default="", index=True)
+    gmail_id: Mapped[str] = mapped_column(String, default="")   # Gmail's own id (OAuth sends)
+    label_state: Mapped[str] = mapped_column(String, default="")  # what is applied now
+    label_target: Mapped[str] = mapped_column(String, default="")  # what it should be
     days_since_sent: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -184,7 +197,9 @@ class BlogResearchJob(Base):
     articles_found: Mapped[int] = mapped_column(Integer, default=0)
     links_found: Mapped[int] = mapped_column(Integer, default=0)
     emails_found: Mapped[int] = mapped_column(Integer, default=0)
-    phase: Mapped[str] = mapped_column(String, default="")  # articles/links/emails
+    phase: Mapped[str] = mapped_column(String, default="")
+    # Plain-English summary of why articles did / didn't yield links
+    summary: Mapped[str] = mapped_column(String, default="")  # articles/links/emails
     autopilot: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -201,4 +216,5 @@ class BlogResearchLink(Base):
     email: Mapped[str] = mapped_column(String, default="")           # scraped email (later)
     email_status: Mapped[str] = mapped_column(String, default="pending")  # pending/found/no_email
     published_date: Mapped[str] = mapped_column(String, default="")   # article publish date (YYYY-MM-DD)
+    category: Mapped[str] = mapped_column(String, default="")         # site section the article came from
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

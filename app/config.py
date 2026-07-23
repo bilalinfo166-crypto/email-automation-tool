@@ -25,6 +25,8 @@ class Settings:
     SCOPES = [
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.readonly",
+        # needed to attach our outreach labels to sent mail
+        "https://www.googleapis.com/auth/gmail.modify",
     ]
 
 

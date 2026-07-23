@@ -15,10 +15,11 @@ from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DOMAIN_BUDGET = 14    # max seconds per domain (balance: enough to reach contact pages)
+DOMAIN_BUDGET = 22    # max seconds per domain — with 50 parallel workers we can
+                      # afford to dig deeper without slowing the whole job
 PAGE_TIMEOUT = 6      # homepage timeout
 PAGE_TIMEOUT_QUICK = 4  # subsequent pages
-MAX_PAGES = 8         # check pages when email not found
+MAX_PAGES = 12        # check pages when email not found
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 _s = requests.Session()
@@ -91,8 +92,10 @@ def _valid_tld(dom):
     return two in VALID_TLDS or one in VALID_TLDS
 
 # Priority pages (most likely to have emails)
-P1_PATHS = ["/contact","/contact-us","/about","/about-us","/privacy","/privacy-policy",
-            "/legal/privacy-policy","/legal/privacy","/legal","/legal-notice"]
+P1_PATHS = ["/contact","/contact-us","/contactus","/about","/about-us","/aboutus",
+            "/privacy","/privacy-policy","/legal/privacy-policy","/legal/privacy",
+            "/legal","/legal-notice","/contact.html","/about.html",
+            "/pages/contact","/pages/about","/get-in-touch","/reach-us"]
 P2_PATHS = ["/blog","/advertise","/write-for-us","/guest-post","/team","/support",
             "/terms","/terms-and-conditions","/legal/terms","/legal/terms-and-condition",
             "/imprint","/disclaimer","/cookie-policy","/impressum"]
@@ -552,7 +555,7 @@ def extract_domain(domain, mode="vendor"):
             p=urlparse(u).path.lower()
             if any(k in p for k in ["contact","about","privacy","legal","terms"]) and u not in p1: p1.append(u)
 
-        for pg in p1[:6]:
+        for pg in p1[:8]:
             if done(): break
             h=_get(pg, min(PAGE_TIMEOUT_QUICK, budget()))
             if h:

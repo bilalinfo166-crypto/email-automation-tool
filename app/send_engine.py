@@ -16,6 +16,7 @@ from .database import SessionLocal, Sender
 from .crm_models import OutreachEntry, EventLog, Campaign
 from .gmail_send import send_via_smtp, send_via_oauth
 from .email_templates import get_template, render_template
+from .blog_templates import get_blog_template, render_blog_template
 from . import security
 from .config import settings
 
@@ -68,9 +69,18 @@ def _build_variables(entry, sender, unsub_token=""):
     base = settings.PUBLIC_URL
     unsub_url = f"{base}/unsubscribe?t={unsub_token}" if unsub_token else f"{base}/unsubscribe?t=none"
 
+    # Blog research: the site + article where we spotted their link. These make
+    # the pitch specific ("I saw your link on X in this piece") instead of generic.
+    ref_site = (getattr(entry, "ref_site", "") or "").replace("www.", "")
+    ref_article = getattr(entry, "ref_article", "") or ""
+    ref_site_name = ref_site.split(".")[0].replace("-", " ").title() if ref_site else ""
+
     return {
         # company_name in body = clean name only ("Today")
         "company_name": company,
+        "ref_site": ref_site,                 # techbullion.com
+        "ref_site_name": ref_site_name,       # TechBullion
+        "ref_article": ref_article,           # full URL of the article
         # website/site in subject = full domain ("Today.com")
         "website": site_full,
         "sender_name": (sender.name or sender.email.split("@")[0]).split()[0].title(),
@@ -138,22 +148,38 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             db.commit()
 
             senders = _get_senders(db, mode)
-            # Filter to only selected senders if specified
+            # STRICT: if the user picked specific senders, use ONLY those.
             if sender_filter:
-                allowed = [e.strip() for e in sender_filter.split(",") if e.strip()]
-                senders = [s for s in senders if s.email in allowed]
+                allowed = [e.strip().lower() for e in sender_filter.split(",") if e.strip()]
+                usable = [s for s in senders if s.email.lower() in allowed]
+                missing = [a for a in allowed
+                           if a not in [s.email.lower() for s in usable]]
+                if missing:
+                    print(f"[SendEngine] These chosen senders can't be used "
+                          f"(not found / auth failed): {', '.join(missing)}")
+                senders = usable
             if not senders:
                 campaign.status = "error: no senders"
                 db.commit()
+                print("[SendEngine] Campaign stopped — none of the chosen senders are usable.")
                 return
+            print(f"[SendEngine] Campaign #{campaign_id}: sending "
+                  f"{total_target if total_target > 0 else 'all pending'} email(s) "
+                  f"via {len(senders)} sender(s): "
+                  f"{', '.join(s.email for s in senders)}")
 
-            # Get pending entries — limit to target if set
+            # Get pending entries.
+            # When a target is set we deliberately fetch MORE than the target:
+            # some rows turn out to be unsendable (bad address, unsubscribed,
+            # already claimed) and must be replaced, otherwise asking for 100
+            # would deliver fewer than 100. The loop stops the moment exactly
+            # `total_target` emails have actually gone out.
             q = db.query(OutreachEntry).filter(
                 OutreachEntry.mode == mode,
                 OutreachEntry.status.in_(["pending", "queued"])
             ).order_by(OutreachEntry.id)
             if total_target > 0:
-                pending = q.limit(total_target).all()
+                pending = q.limit(total_target * 4 + 200).all()
             else:
                 pending = q.all()
 
@@ -179,6 +205,12 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             last_sent_at = {}
 
             for i, entry in enumerate(pending):
+                # EXACT TARGET: stop the moment we've sent what was asked for.
+                if total_target > 0 and sent_count >= total_target:
+                    print(f"[SendEngine] Target reached — sent exactly "
+                          f"{sent_count}/{total_target}.")
+                    break
+
                 # Check if manually stopped (fast in-memory flag, not DB)
                 if stop_flag["stop"]:
                     print(f"[SendEngine] Campaign #{campaign_id} manually stopped.")
@@ -239,13 +271,21 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 token = uuid.uuid4().hex
                 entry.unsub_token = token
 
-                # Round-robin template (vendor mode uses vendor templates)
+                # Round-robin template (each mode has its own set)
                 if mode == "vendor":
                     from .vendor_templates import get_vendor_template, render_vendor_template
                     template = get_vendor_template(template_idx)
                     variables = _build_variables(entry, sender, unsub_token=token)
                     rendered = render_vendor_template(template, variables)
+                elif mode == "blog" and (entry.ref_article or ""):
+                    # Blog research prospects get templates that name the exact
+                    # site and article where we found their link.
+                    template = get_blog_template(template_idx)
+                    variables = _build_variables(entry, sender, unsub_token=token)
+                    rendered = render_blog_template(template, variables)
                 else:
+                    # No article on record (older prospect) — use the generic
+                    # pitch rather than sending a mail with blanks in it.
                     template = get_template(template_idx)
                     variables = _build_variables(entry, sender, unsub_token=token)
                     rendered = render_template(template, variables)
@@ -283,7 +323,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                     if sender.method == "app_password":
                         app_pw = security.decrypt(sender.app_password) if sender.app_password else ""
                         if app_pw:
-                            send_via_smtp(
+                            res = send_via_smtp(
                                 sender_email=sender.email,
                                 sender_name=sender.name or "",
                                 app_password=app_pw,
@@ -291,6 +331,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                                 subject=rendered["subject"],
                                 body_html=rendered["body_html"],
                             )
+                            entry.message_id = res.get("message_id", "")
                             sent_ok = True
                     elif sender.method == "oauth":
                         import json
@@ -308,9 +349,13 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                             # OAuth may refresh the token — save the updated one
                             if result.get("creds"):
                                 sender.oauth_token = security.encrypt(json.dumps(result["creds"]))
+                            entry.message_id = result.get("message_id", "")
+                            entry.gmail_id = result.get("gmail_id", "")
                             sent_ok = True
 
                     if sent_ok:
+                        # Tell the label worker what this message should be tagged as
+                        entry.label_target = f"{entry.mode}:0"
                         entry.status = "sent"
                         entry.sent_at = datetime.utcnow()
                         entry.sender_email = sender.email
@@ -322,6 +367,11 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                         db.commit()
                         sent_count += 1
                         last_sent_at[sender.email] = time.time()
+                        try:
+                            from . import gmail_labels
+                            gmail_labels.kick()   # label it almost immediately
+                        except Exception:
+                            pass
                         print(f"[SendEngine] Sent #{sent_count}: {entry.email} via {sender.email}")
                     else:
                         entry.status = "failed"
@@ -339,9 +389,25 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 # so different senders send back-to-back while each sender paces itself.)
 
             # Campaign complete
-            campaign.status = "completed"
-            db.commit()
-            print(f"[SendEngine] Campaign #{campaign_id} done. Sent {sent_count} emails.")
+            if total_target > 0 and sent_count < total_target:
+                # Ran out of sendable contacts before hitting the target — say so
+                # plainly instead of silently reporting "completed".
+                left = db.query(OutreachEntry).filter(
+                    OutreachEntry.mode == mode,
+                    OutreachEntry.status.in_(["pending", "queued"])).count()
+                campaign.status = "completed"
+                db.commit()
+                print(f"[SendEngine] Campaign #{campaign_id} finished with "
+                      f"{sent_count}/{total_target} sent — ran out of valid "
+                      f"contacts ({left} left in the list, but they were "
+                      f"unsendable: bad address, unsubscribed or already sent).")
+            else:
+                campaign.status = "completed"
+                db.commit()
+                print(f"[SendEngine] Campaign #{campaign_id} done. "
+                      f"Sent {sent_count} email(s)"
+                      + (f" — exactly the {total_target} requested."
+                         if total_target > 0 else "."))
 
         except Exception as e:
             print(f"[SendEngine] Error: {e}")

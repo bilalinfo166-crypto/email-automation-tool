@@ -661,10 +661,17 @@ def stop_sending(campaign_id: int, db: Session = Depends(get_db)):
 
 @router.get("/templates")
 def list_templates(mode: str = "client"):
-    """Return outreach templates for the mode: client (guest post service) or vendor (asking sites)."""
+    """Return outreach templates for the mode:
+    vendor = asking sites for a paid guest post
+    blog   = pitching prospects found via blog research (names their article)
+    client = pitching our guest-posting service
+    """
     if mode == "vendor":
         from .vendor_templates import VENDOR_TEMPLATES
         return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(VENDOR_TEMPLATES)]
+    if mode == "blog":
+        from .blog_templates import BLOG_TEMPLATES
+        return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(BLOG_TEMPLATES)]
     from .email_templates import TEMPLATES
     return [{"id": i+1, "subject": t["subject"], "body": t["body"]} for i, t in enumerate(TEMPLATES)]
 
@@ -891,25 +898,228 @@ _blog_threads = {}
 _blog_stop = {}
 
 
-@router.post("/replies/check")
-def check_replies_now(days: int = 14, db: Session = Depends(get_db)):
-    """Scan every sender's inbox now and mark anyone who replied.
-    Works locally — the server connects out to Gmail, no public URL needed."""
-    from . import reply_tracker
+@router.post("/blog/backfill-articles")
+def blog_backfill_articles(db: Session = Depends(get_db)):
+    """Fill in the source site + article for blog prospects saved earlier.
+
+    Blog research always recorded which site and article a link came from — it
+    just wasn't copied onto the outreach row until recently. This copies it
+    across, so older prospects get the same personalised email as new ones.
+    """
+    from .crm_models import OutreachEntry, BlogResearchLink
+
+    todo = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == "blog",
+        (OutreachEntry.ref_article == "") | (OutreachEntry.ref_article.is_(None)),
+    ).all()
+    if not todo:
+        return {"updated": 0, "still_missing": 0,
+                "note": "Every blog prospect already has its article."}
+
+    # Load the link records once and index them (fast, no query per row)
+    by_email, by_domain = {}, {}
+    for lk in db.query(BlogResearchLink).filter(
+            BlogResearchLink.source_article != "").all():
+        if lk.email:
+            by_email.setdefault(lk.email.strip().lower(), lk)
+        if lk.target_domain:
+            by_domain.setdefault(lk.target_domain.replace("www.", "").lower(), lk)
+
+    updated = 0
+    for e in todo:
+        lk = by_email.get((e.email or "").strip().lower())
+        if lk is None:
+            lk = by_domain.get((e.domain or "").replace("www.", "").lower())
+        if lk is None:
+            continue
+        e.ref_site = lk.source_site or ""
+        e.ref_article = lk.source_article or ""
+        updated += 1
+    db.commit()
+
+    missing = db.query(OutreachEntry).filter(
+        OutreachEntry.mode == "blog",
+        (OutreachEntry.ref_article == "") | (OutreachEntry.ref_article.is_(None)),
+    ).count()
+    print(f"[BlogResearch] Backfilled article details for {updated} prospect(s).")
+    return {"updated": updated, "still_missing": missing,
+            "note": "Older blog prospects now carry the site and article we found "
+                    "them in, so their emails are personalised too."}
+
+
+@router.post("/senders/recalc")
+def recalc_sender_stats(db: Session = Depends(get_db)):
+    """Rebuild each sender's counters from the real sending history.
+
+    Deleting and re-adding a sender wipes its own counters (sent/replies), even
+    though every email it sent is still on record. This recomputes them from
+    those records, so the numbers come back.
+    """
+    from .crm_models import OutreachEntry
+    from .database import Sender
+    from datetime import datetime, timedelta
+
+    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    for s in db.query(Sender).all():
+        base = db.query(OutreachEntry).filter(OutreachEntry.sender_email == s.email)
+        total = base.filter(OutreachEntry.status.in_(
+            ["sent", "opened", "replied", "bounced"])).count()
+        replied = base.filter(OutreachEntry.status == "replied").count()
+        bounced = base.filter(OutreachEntry.status == "bounced").count()
+        today = base.filter(OutreachEntry.sent_at >= midnight).count()
+
+        before = s.total_sent or 0
+        s.total_sent = total
+        s.sent_today = today
+        s.replies = replied
+        s.failed = bounced
+        out.append({"sender": s.email, "was": before, "now": total,
+                    "sent_today": today, "replies": replied, "bounced": bounced})
+    db.commit()
+    print(f"[Senders] Recalculated stats for {len(out)} sender(s).")
+    return {"senders": out,
+            "note": "Counters rebuilt from the emails actually on record."}
+
+
+@router.post("/labels/apply")
+def labels_apply(limit: int = 300, db: Session = Depends(get_db)):
+    """Apply Gmail labels to sent messages that don't have them yet."""
+    from . import gmail_labels
     try:
-        return reply_tracker.check_replies(db, days=days)
+        return gmail_labels.label_pending(db, limit=limit)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"labelled": 0, "error": str(e)}
+
+
+@router.post("/labels/relabel")
+def labels_relabel(mode: str = "", db: Session = Depends(get_db)):
+    """Re-apply labels to already-labelled mail (use after changing a label name)."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(OutreachEntry.message_id != "")
+    if mode:
+        q = q.filter(OutreachEntry.mode == mode)
+    n = q.update({"label_state": ""}, synchronize_session=False)
+    db.commit()
+    try:
+        from . import gmail_labels
+        gmail_labels.kick()
+    except Exception:
+        pass
+    return {"queued_for_relabel": n,
+            "note": "The label worker will re-tag these within ~15 seconds."}
+
+
+@router.get("/labels/status")
+def labels_status(db: Session = Depends(get_db)):
+    """Per-sender label health: which senders can label, and why not if they can't."""
+    from .crm_models import OutreachEntry
+    from .database import Sender
+    from . import gmail_labels
+    waiting = db.query(OutreachEntry).filter(
+        OutreachEntry.message_id != "",
+        OutreachEntry.label_state != OutreachEntry.label_target).count()
+
+    rows = []
+    for s in db.query(Sender).all():
+        pend = db.query(OutreachEntry).filter(
+            OutreachEntry.sender_email == s.email,
+            OutreachEntry.message_id != "",
+            OutreachEntry.label_state != OutreachEntry.label_target).count()
+        labelled = db.query(OutreachEntry).filter(
+            OutreachEntry.sender_email == s.email,
+            OutreachEntry.label_state != "",
+            OutreachEntry.label_state == OutreachEntry.label_target).count()
+        err = gmail_labels._sender_errors.get(s.email, "")
+        rows.append({"sender": s.email, "method": s.method,
+                     "labelled": labelled, "waiting": pend,
+                     "problem": err or ""})
+
+    t = gmail_labels._thread
+    return {"worker_running": bool(t is not None and t.is_alive()),
+            "waiting_for_label": waiting,
+            "senders": rows,
+            "labels": list(gmail_labels.LABEL_COLORS.keys())}
+
+
+@router.post("/followups/test")
+def followups_test(email: str = "", mode: str = "vendor", sender: str = "",
+                   company: str = "", db: Session = Depends(get_db)):
+    """Send ONE sample follow-up to your own address to preview the wording.
+    Changes nothing in your real send list."""
+    from . import followup_engine
+    return followup_engine.send_test(db, to_email=email, mode=mode,
+                                     sender_email=sender, company=company)
+
+
+@router.get("/followups/due")
+def followups_due(mode: str = "", delay_hours: int = 24, max_followups: int = 2,
+                  db: Session = Depends(get_db)):
+    """Preview who is due a reminder — sends nothing."""
+    from . import followup_engine
+    return followup_engine.run_followups(db, mode=mode, delay_hours=delay_hours,
+                                         max_followups=max_followups, dry_run=True)
+
+
+@router.post("/followups/run")
+def followups_run(mode: str = "", delay_hours: int = 24, max_followups: int = 2,
+                  limit: int = 200, db: Session = Depends(get_db)):
+    """Send reminders now to everyone who hasn't replied."""
+    from . import followup_engine
+    try:
+        return followup_engine.run_followups(db, mode=mode, delay_hours=delay_hours,
+                                             max_followups=max_followups, limit=limit)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return {"replies_found": 0, "error": str(e)}
+        return {"sent": 0, "error": str(e)}
+
+
+@router.post("/followups/auto")
+def followups_auto(enabled: bool = True, delay_hours: int = 24, max_followups: int = 2):
+    """Turn automatic follow-ups on or off."""
+    from . import followup_engine
+    if enabled:
+        return followup_engine.start(interval_minutes=60, delay_hours=delay_hours,
+                                     max_followups=max_followups)
+    return followup_engine.stop()
+
+
+@router.get("/followups/status")
+def followups_status():
+    from . import followup_engine
+    t = followup_engine._thread
+    return {"running": bool(t is not None and t.is_alive()),
+            "delay_hours": followup_engine.DEFAULT_DELAY_HOURS,
+            "max_followups": followup_engine.MAX_FOLLOWUPS}
+
+
+@router.post("/replies/check")
+def check_replies_now(days: int = 14, db: Session = Depends(get_db)):
+    """Kick off an inbox scan in the background and return immediately.
+    Reading several mailboxes takes minutes, so this never blocks the request.
+    Poll /crm/replies/status for the result."""
+    from . import reply_tracker
+    return reply_tracker.check_now()
+
+
+@router.post("/replies/reset")
+def replies_reset(mode: str = "", db: Session = Depends(get_db)):
+    """Clear reply marks made by the old address-based matching."""
+    from . import reply_tracker
+    try:
+        return reply_tracker.reset_replies(db, mode=mode)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"reset": 0, "error": str(e)}
 
 
 @router.get("/replies/status")
 def replies_status():
-    """Is the automatic reply checker running?"""
+    """Result of the last reply check + whether one is running right now."""
     from . import reply_tracker
-    t = reply_tracker._thread
-    return {"running": bool(t is not None and t.is_alive())}
+    return reply_tracker.last_result()
 
 
 @router.post("/blog/check-sites")
@@ -918,14 +1128,24 @@ def check_blog_sites(sites: str = ""):
     (MSN, Yahoo, Forbes...) and unreachable sites so the user doesn't waste time.
     Returns a per-site verdict."""
     from . import blog_research
+    from concurrent.futures import ThreadPoolExecutor
     site_list = [s.strip() for s in re.split(r"[,\n]", sites) if s.strip()]
-    results = []
-    warnings = 0
-    for s in site_list:
-        verdict = blog_research.check_site(s)
-        if not verdict["ok"]:
-            warnings += 1
-        results.append({"site": s, **verdict})
+    if not site_list:
+        return {"results": [], "total": 0, "warnings": 0, "all_ok": True}
+
+    # Check every site AT THE SAME TIME. Done one by one, ten sites meant up to
+    # seventy sequential requests — minutes of staring at a spinner.
+    def _one(site):
+        try:
+            return {"site": site, **blog_research.check_site(site)}
+        except Exception as e:
+            return {"site": site, "ok": True, "reason": "check_failed",
+                    "hint": f"Couldn't pre-check '{site}' ({e}). Research will still try it."}
+
+    with ThreadPoolExecutor(max_workers=min(12, len(site_list))) as ex:
+        results = list(ex.map(_one, site_list))
+
+    warnings = sum(1 for r in results if not r.get("ok"))
     return {"results": results, "total": len(site_list),
             "warnings": warnings,
             "all_ok": warnings == 0}
@@ -972,6 +1192,16 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
         from .crm_models import OutreachEntry
         from concurrent.futures import ThreadPoolExecutor as _TPE
         import threading as _threading
+
+        # Collected across every site so we can explain the result afterwards
+        run_stats = {}
+
+        # Tell the extractor which domains we're researching, so a link pointing
+        # back at one of them is never offered as a prospect.
+        try:
+            blog_research.set_source_sites(sites)
+        except Exception:
+            pass
 
         # Thread-safe dedup: parallel workers reserve an email here BEFORE the
         # DB insert, so two workers scraping the same email can't both add it.
@@ -1041,7 +1271,9 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                                 s.add(OutreachEntry(
                                     mode="blog", email=email, domain=lk.target_domain,
                                     email_type="blog_research", confidence="medium",
-                                    source_url=lk.target_url, status="pending"))
+                                    source_url=lk.target_url, status="pending",
+                                    ref_site=lk.source_site or "",
+                                    ref_article=lk.source_article or ""))
                                 print(f"[BlogResearch]   + added {lk.target_domain} -> {email}")
                     else:
                         lk.email_status = "no_email"
@@ -1061,7 +1293,7 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 s.close()
 
         # Live email-scrape pool: fires as links come in, parallel to research
-        email_pool = _TPE(max_workers=15)
+        email_pool = _TPE(max_workers=50)   # scrape emails as fast as links are found
         email_futures = []
 
         try:
@@ -1095,6 +1327,7 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                         source_article=r["source_article"],
                         target_domain=r["target_domain"], target_url=r["target_url"],
                         published_date=r.get("published_date", ""),
+                        category=r.get("category", ""),
                     )
                     bg.add(link)
                     bg.flush()  # assign link.id without a full commit
@@ -1113,8 +1346,9 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                     print(f"[BlogResearch] Researching {site}...")
                     blog_research.research_site(
                         site, j.time_range, j.max_articles,
-                        workers=10, on_article=on_article, on_link=on_link,
-                        should_stop=lambda: _blog_stop.get(job_id, {}).get("stop", False))
+                        workers=50, on_article=on_article, on_link=on_link,
+                        should_stop=lambda: _blog_stop.get(job_id, {}).get("stop", False),
+                        on_stats=run_stats)
                     print(f"[BlogResearch] Done {site}")
                 except Exception as e:
                     import traceback
@@ -1129,6 +1363,19 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
             j.status = "done"; j.phase = "emails"
             j.links_found = bg.query(BlogResearchLink).filter(
                 BlogResearchLink.job_id == job_id).count()
+            # Explain the outcome in plain words, so "0 links" is never a mystery
+            try:
+                bits = []
+                if run_stats.get("ok"):          bits.append(f"{run_stats['ok']} article(s) had outbound links")
+                if run_stats.get("no_links"):    bits.append(f"{run_stats['no_links']} had none")
+                if run_stats.get("too_old"):     bits.append(f"{run_stats['too_old']} were outside the {j.time_range} window")
+                if run_stats.get("unreachable"): bits.append(f"{run_stats['unreachable']} wouldn't load")
+                if run_stats.get("blocked"):     bits.append(f"{run_stats['blocked']} were blocked by the site")
+                j.summary = " · ".join(bits)
+                if j.summary:
+                    print(f"[BlogResearch] Job {job_id} summary: {j.summary}")
+            except Exception:
+                pass
             bg.commit()
             print(f"[BlogResearch] Job {job_id} research complete: {j.links_found} links. "
                   f"Waiting for {len(email_futures)} live email scrapes...")
@@ -1285,6 +1532,7 @@ def list_blog_jobs(db: Session = Depends(get_db)):
              "articles_found": j.articles_found or 0,
              "links_found": j.links_found, "emails_found": j.emails_found or 0,
              "phase": j.phase or "", "time_range": j.time_range,
+             "summary": getattr(j, "summary", "") or "",
              "autopilot": j.autopilot,
              "created_at": j.created_at.isoformat() if j.created_at else ""} for j in jobs]
 
@@ -1300,7 +1548,8 @@ def blog_links(job_id: int, page: int = 1, limit: int = 100, db: Session = Depen
                        "source_article": l.source_article,
                        "target_domain": l.target_domain, "target_url": l.target_url,
                        "email": l.email, "email_status": l.email_status,
-                       "published_date": getattr(l, "published_date", "")} for l in links]}
+                       "published_date": getattr(l, "published_date", ""),
+                       "category": getattr(l, "category", "")} for l in links]}
 
 
 @router.get("/blog/{job_id}/export")
@@ -1319,11 +1568,12 @@ def blog_export(job_id: int, format: str = "csv", only_emails: bool = False,
         q = q.filter(BlogResearchLink.email_status == "found")
     links = q.order_by(BlogResearchLink.id).all()
 
-    headers_row = ["From Site", "Published Date", "Source Article", "Target Domain",
-                   "Target URL", "Email", "Email Status"]
+    headers_row = ["From Site", "Category", "Published Date", "Source Article",
+                   "Target Domain", "Target URL", "Email", "Email Status"]
 
     def row_of(l):
-        return [l.source_site or "", getattr(l, "published_date", "") or "",
+        return [l.source_site or "", getattr(l, "category", "") or "",
+                getattr(l, "published_date", "") or "",
                 l.source_article or "", l.target_domain or "",
                 l.target_url or "", l.email or "", l.email_status or ""]
 
@@ -1381,7 +1631,9 @@ def blog_export(job_id: int, format: str = "csv", only_emails: bool = False,
                             bg.add(OutreachEntry(
                                 mode="blog", email=email, domain=link.target_domain,
                                 email_type="blog_research", confidence="medium",
-                                source_url=link.target_url, status="pending"))
+                                source_url=link.target_url, status="pending",
+                                ref_site=link.source_site or "",
+                                ref_article=link.source_article or ""))
                     else:
                         link.email_status = "no_email"
                     bg.commit()
@@ -1513,7 +1765,7 @@ def blog_debug(site: str = "techbullion.com", time_range: str = "1m"):
         art_url = art[0] if isinstance(art, (list, tuple)) else art
         art_date = art[1] if isinstance(art, (list, tuple)) and len(art) > 1 else ""
         try:
-            links = blog_research._extract_external_links(art_url)
+            links, reason = blog_research._extract_external_links(art_url)
             total_links += len(links)
             # DEEP DIAGNOSTIC: count raw anchors vs external ones to see where
             # links are being lost (no body container? all internal? filtered?)
@@ -1539,7 +1791,7 @@ def blog_debug(site: str = "techbullion.com", time_range: str = "1m"):
             except Exception as de:
                 diag["diag_error"] = str(de)
             article_links.append({"article": art_url, "date": art_date,
-                                   "links": len(links),
+                                   "links": len(links), "reason": reason,
                                    "domains": [l[0] for l in links[:8]],
                                    "diag": diag})
         except Exception as e:

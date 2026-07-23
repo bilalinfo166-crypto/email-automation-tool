@@ -173,6 +173,14 @@ def _startup():
     except Exception as e:
         print(f"[ReplyTracker] Could not start: {e}")
 
+    # ---- Gmail labelling ----
+    # Tags every message we send with a coloured label in the SENDER's Gmail.
+    try:
+        from . import gmail_labels
+        gmail_labels.start(interval_seconds=15)
+    except Exception as e:
+        print(f"[Labels] Could not start: {e}")
+
 
 def _reset_daily(s: Sender):
     if s.last_send_date != date.today():
