@@ -177,6 +177,7 @@ class OutreachEntry(Base):
     ref_title: Mapped[str] = mapped_column(String, default="")
     message_id: Mapped[str] = mapped_column(String, default="", index=True)
     gmail_id: Mapped[str] = mapped_column(String, default="")   # Gmail's own id (OAuth sends)
+    deal_stage: Mapped[str] = mapped_column(String, default="")   # "" | "dealing" | "done"
     label_state: Mapped[str] = mapped_column(String, default="")  # what is applied now
     label_target: Mapped[str] = mapped_column(String, default="")  # what it should be
     days_since_sent: Mapped[int] = mapped_column(Integer, default=0)
@@ -217,4 +218,43 @@ class BlogResearchLink(Base):
     email_status: Mapped[str] = mapped_column(String, default="pending")  # pending/found/no_email
     published_date: Mapped[str] = mapped_column(String, default="")   # article publish date (YYYY-MM-DD)
     category: Mapped[str] = mapped_column(String, default="")         # site section the article came from
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Deal(Base):
+    """A live negotiation with a site owner / vendor.
+
+    One row per contact (not per site) — an owner with fifty sites is still one
+    person to deal with, so all their domains sit on the same row.
+    Populated automatically from their replies, then kept up to date as the
+    conversation continues.
+    """
+    __tablename__ = "deals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String, default="vendor", index=True)
+
+    # who
+    vendor_email: Mapped[str] = mapped_column(String, index=True)   # their address
+    our_email: Mapped[str] = mapped_column(String, default="")      # sender we used
+
+    # what they own
+    primary_site: Mapped[str] = mapped_column(String, default="")   # the site we contacted
+    sites: Mapped[str] = mapped_column(Text, default="")            # every domain they offer
+    sheet_url: Mapped[str] = mapped_column(String, default="")      # price list they shared
+
+    # commercials
+    currency: Mapped[str] = mapped_column(String, default="")        # USD / EUR / GBP ...
+    guest_post_price: Mapped[str] = mapped_column(String, default="")
+    link_insert_price: Mapped[str] = mapped_column(String, default="")
+    dofollow_links: Mapped[str] = mapped_column(String, default="")
+    nofollow_links: Mapped[str] = mapped_column(String, default="")
+    tat: Mapped[str] = mapped_column(String, default="")             # turnaround time
+    sample_url: Mapped[str] = mapped_column(String, default="")
+
+    # state
+    status: Mapped[str] = mapped_column(String, default="pending")   # pending/dealing/done
+    deal_date: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    first_reply_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    last_reply_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

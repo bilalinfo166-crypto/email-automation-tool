@@ -49,6 +49,56 @@ AUTO_SUBJECTS = ("out of office", "automatic reply", "auto-reply", "autoreply",
                  "away from my desk", "on vacation", "thank you for contacting")
 
 
+def _gmail_body(message) -> str:
+    """Readable text out of a Gmail API message payload."""
+    import base64
+
+    def _walk(part):
+        mime = part.get("mimeType", "")
+        data = (part.get("body") or {}).get("data")
+        if data and mime in ("text/plain", "text/html"):
+            try:
+                return base64.urlsafe_b64decode(data).decode("utf-8", "replace")[:8000]
+            except Exception:
+                return ""
+        for sub in part.get("parts", []) or []:
+            got = _walk(sub)
+            if got:
+                return got
+        return ""
+
+    try:
+        return _walk(message.get("payload", {}) or {})
+    except Exception:
+        return ""
+
+
+def _plain_text(msg) -> str:
+    """Readable text of an email, preferring the plain-text part."""
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        return payload.decode(part.get_content_charset() or "utf-8",
+                                              errors="replace")[:8000]
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        return payload.decode(part.get_content_charset() or "utf-8",
+                                              errors="replace")[:8000]
+            return ""
+        payload = msg.get_payload(decode=True)
+        if payload:
+            return payload.decode(msg.get_content_charset() or "utf-8",
+                                  errors="replace")[:8000]
+    except Exception:
+        pass
+    return ""
+
+
 def _referenced_ids(hdr) -> set:
     """Message-IDs this incoming email is answering (In-Reply-To + References)."""
     ids = set()
@@ -95,6 +145,7 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
     check take hours (or appear to hang).
     """
     replied_to, bounced, reply_from = set(), set(), set()
+    threads = {}         # message-id / sender -> every message of that conversation
     mail = None
     try:
         # Hard timeout so one unresponsive mailbox can't stall everything
@@ -111,13 +162,14 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
                     continue
                 recent = ids[-300:]          # newest 300
                 id_set = b",".join(recent)
-                _, msg_data = mail.fetch(
-                    id_set,
-                    "(BODY.PEEK[HEADER.FIELDS (FROM IN-REPLY-TO REFERENCES SUBJECT)])")
+                # Headers AND the message text — the body is what carries the
+                # price, link counts and turnaround time for the deals sheet.
+                _, msg_data = mail.fetch(id_set, "(BODY.PEEK[])")
                 for part in msg_data:
                     if isinstance(part, tuple) and part[1]:
                         try:
                             hdr = email.message_from_bytes(part[1])
+                            body_text = _plain_text(hdr)
                             refs = _referenced_ids(hdr)
                             frm = _addr(hdr.get("From", ""))
                             subj = hdr.get("Subject", "") or ""
@@ -135,6 +187,14 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
                             # rows can still be matched by address.
                             if frm:
                                 reply_from.add(frm)
+                            if body_text:
+                                # Keep every message of the conversation, in the
+                                # order it arrived — a deal is negotiated across
+                                # several emails, not settled in the first one.
+                                stamp = hdr.get("Date", "") or ""
+                                for key in list(refs) + ([frm] if frm else []):
+                                    threads.setdefault(key, []).append(
+                                        (stamp, frm, body_text))
                         except Exception:
                             continue
                 print(f"[ReplyTracker] {sender_email}: read {len(recent)} from {folder}")
@@ -149,7 +209,7 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
                 mail.logout()
             except Exception:
                 pass
-    return replied_to, bounced, reply_from
+    return replied_to, bounced, reply_from, threads
 
 
 def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
@@ -158,6 +218,7 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
     Same rule as IMAP: only messages that reference one of OUR Message-IDs count.
     """
     replied_to, bounced, reply_from = set(), set(), set()
+    threads = {}
     refreshed = None
     try:
         from googleapiclient.discovery import build
@@ -175,6 +236,7 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
             hdrs = {}
             for h in response.get("payload", {}).get("headers", []):
                 hdrs[h.get("name", "").lower()] = h.get("value", "")
+            body_text = _gmail_body(response)
             refs = set()
             for key in ("in-reply-to", "references"):
                 for m in MSGID_RE.findall(hdrs.get(key, "")):
@@ -192,13 +254,17 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
             replied_to.update(refs)
             if frm:
                 reply_from.add(frm)
+            if body_text:
+                stamp = hdrs.get("date", "")
+                for key in list(refs) + ([frm] if frm else []):
+                    threads.setdefault(key, []).append((stamp, frm, body_text))
 
         for i in range(0, len(msgs), 100):
             batch = service.new_batch_http_request(callback=_collect)
             for m in msgs[i:i + 100]:
                 batch.add(service.users().messages().get(
-                    userId="me", id=m["id"], format="metadata",
-                    metadataHeaders=["From", "Subject", "In-Reply-To", "References"]))
+                    userId="me", id=m["id"],
+                    format="full"))
             batch.execute()
 
         print(f"[ReplyTracker] Gmail API: read {len(msgs)} messages")
@@ -209,7 +275,7 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
         }
     except Exception as e:
         print(f"[ReplyTracker] Gmail API failed: {type(e).__name__}: {e}")
-    return (replied_to, bounced, reply_from), refreshed
+    return (replied_to, bounced, reply_from, threads), refreshed
 
 
 def check_replies(db, days: int = 14, progress: dict = None) -> dict:
@@ -236,7 +302,13 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
             OutreachEntry.sender_email == s.email,
             OutreachEntry.status.in_(AWAITING),
         ).all()
-        if not awaiting:
+        # Even with nothing new awaiting a reply, the mailbox is still read —
+        # ongoing negotiations need their latest messages so the deals sheet
+        # keeps up with the conversation.
+        has_deals = db.query(OutreachEntry).filter(
+            OutreachEntry.sender_email == s.email,
+            OutreachEntry.status == "replied").count()
+        if not awaiting and not has_deals:
             per_sender.append({"sender": s.email, "checked": 0, "replied": 0})
             continue
         # Newer mail is matched exactly, by the Message-ID we sent.
@@ -248,21 +320,21 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
                    if not e.message_id and e.email}
 
         # Read the mailbox
-        replied_ids, bounced_ids, reply_from = set(), set(), set()
+        replied_ids, bounced_ids, reply_from, threads = set(), set(), set(), {}
         if s.method == "app_password" and s.app_password:
             try:
                 pw = security.decrypt(s.app_password)
             except Exception:
                 pw = ""
             if pw:
-                replied_ids, bounced_ids, reply_from = _inbox_senders_imap(s.email, pw, days)
+                replied_ids, bounced_ids, reply_from, threads = _inbox_senders_imap(s.email, pw, days)
         elif s.method == "oauth" and s.oauth_token:
             try:
                 creds = json.loads(security.decrypt(s.oauth_token))
             except Exception:
                 creds = None
             if creds:
-                (replied_ids, bounced_ids, reply_from), refreshed = _inbox_senders_oauth(creds, days)
+                (replied_ids, bounced_ids, reply_from, threads), refreshed = _inbox_senders_oauth(creds, days)
                 if refreshed:
                     try:
                         s.oauth_token = security.encrypt(json.dumps(refreshed))
@@ -278,10 +350,14 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
                 continue
             entry.status = "replied"
             entry.replied_at = datetime.utcnow()
+            # Move the Gmail label on: this thread is now a conversation.
+            entry.label_target = f"{entry.mode}:dealing"
+            entry.label_state = ""
             try:
                 db.add(EventLog(campaign_id=0, sender_id=s.id, type="replied", contact_id=0))
             except Exception:
                 pass
+            _record_deal(db, entry, threads.get(mid) or threads.get(addr_of(entry)) or [])
             marked += 1
 
         # Older rows: the person we emailed sent us a genuine reply
@@ -291,10 +367,13 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
                 continue
             entry.status = "replied"
             entry.replied_at = datetime.utcnow()
+            entry.label_target = f"{entry.mode}:dealing"
+            entry.label_state = ""
             try:
                 db.add(EventLog(campaign_id=0, sender_id=s.id, type="replied", contact_id=0))
             except Exception:
                 pass
+            _record_deal(db, entry, threads.get(addr) or [])
             marked += 1
 
         # Bounce notifications reference our message too — record them properly
@@ -303,6 +382,20 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
             entry = by_msgid[mid]
             if entry.status not in ("replied", "bounced"):
                 entry.status = "bounced"
+
+        # Anyone already marked as replied should have a deal row too — not just
+        # the ones detected in this pass. Their conversation is re-read each
+        # time, so prices stay current as the negotiation moves on.
+        try:
+            already = db.query(OutreachEntry).filter(
+                OutreachEntry.sender_email == s.email,
+                OutreachEntry.status == "replied").all()
+            for e in already:
+                convo = (threads.get(e.message_id) if e.message_id else None) \
+                        or threads.get(addr_of(e)) or []
+                _record_deal(db, e, convo)
+        except Exception as de:
+            print(f"[ReplyTracker] deal sync warning for {s.email}: {de}")
 
         if marked:
             try:
@@ -313,6 +406,12 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
         if marked:
             print(f"[ReplyTracker] {s.email}: {marked} new repl{'y' if marked==1 else 'ies'}")
 
+        if marked:
+            try:
+                from . import gmail_labels
+                gmail_labels.kick()
+            except Exception:
+                pass
         total_marked += marked
         per_sender.append({"sender": s.email, "checked": len(awaiting), "replied": marked})
 
@@ -430,3 +529,111 @@ def last_result():
     out["in_progress"] = running
     out["auto_poller_running"] = bool(_thread is not None and _thread.is_alive())
     return out
+
+
+def addr_of(entry) -> str:
+    return (entry.email or "").strip().lower()
+
+
+def _record_deal(db, entry, conversation=None):
+    """Create or update the deal row from the WHOLE conversation.
+
+    A price is rarely settled in the first email — they quote, we push back,
+    they agree a different number. So every message is read in order and later
+    answers replace earlier ones. The last thing they said is what stands.
+    """
+    from .crm_models import Deal
+    from . import deal_parser
+
+    email = addr_of(entry)
+    if not email:
+        return
+    deal = db.query(Deal).filter(Deal.vendor_email == email,
+                                 Deal.mode == entry.mode).first()
+    now = datetime.utcnow()
+    if deal is None:
+        deal = Deal(mode=entry.mode, vendor_email=email,
+                    our_email=entry.sender_email or "",
+                    primary_site=(entry.domain or "").replace("www.", ""),
+                    sites=(entry.domain or "").replace("www.", ""),
+                    first_reply_at=now, status="dealing")
+        db.add(deal)
+    deal.last_reply_at = now
+    if not deal.our_email:
+        deal.our_email = entry.sender_email or ""
+
+    messages = conversation or []
+    if not messages:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        return
+
+    # Oldest first, so the newest message has the final say
+    def _when(m):
+        try:
+            from email.utils import parsedate_to_datetime
+            return parsedate_to_datetime(m[0]) or datetime.min
+        except Exception:
+            return datetime.min
+    try:
+        messages = sorted(messages, key=_when)
+    except Exception:
+        pass
+
+    FIELDS = ("currency", "guest_post_price", "link_insert_price",
+              "dofollow_links", "nofollow_links", "tat", "sheet_url", "sample_url")
+    agreed = {}
+    all_domains = []
+    closed = False
+
+    for _stamp, _frm, text in messages:
+        if not text:
+            continue
+        try:
+            info = deal_parser.parse_reply(text, exclude_domains=[deal.primary_site])
+        except Exception:
+            continue
+        for f in FIELDS:
+            val = info.get(f) or ""
+            if val:
+                agreed[f] = val          # later message wins
+        for d in info.get("domains") or []:
+            if d not in all_domains:
+                all_domains.append(d)
+        if info.get("looks_done"):
+            closed = True
+
+    for f, val in agreed.items():
+        setattr(deal, f, val)
+
+    if all_domains:
+        have = [d for d in (deal.sites or "").split(",") if d]
+        for d in all_domains:
+            if d not in have:
+                have.append(d)
+        primary = deal.primary_site
+        if primary and primary in have:
+            have.remove(primary)
+            have.insert(0, primary)
+        deal.sites = ",".join(have[:60])
+
+    # Keep the conversation itself, so the numbers can always be checked
+    try:
+        deal.notes = "\n\n---\n\n".join(
+            (t or "")[:1500] for _s, _f, t in messages[-6:])[:8000]
+    except Exception:
+        pass
+
+    if closed and deal.status != "done":
+        deal.status = "done"
+        deal.deal_date = now
+        entry.deal_stage = "done"
+        entry.label_target = f"{entry.mode}:done"
+        entry.label_state = ""
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()

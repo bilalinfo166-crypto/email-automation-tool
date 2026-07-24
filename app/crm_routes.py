@@ -993,22 +993,318 @@ def labels_apply(limit: int = 300, db: Session = Depends(get_db)):
         return {"labelled": 0, "error": str(e)}
 
 
-@router.post("/labels/relabel")
-def labels_relabel(mode: str = "", db: Session = Depends(get_db)):
-    """Re-apply labels to already-labelled mail (use after changing a label name)."""
-    from .crm_models import OutreachEntry
-    q = db.query(OutreachEntry).filter(OutreachEntry.message_id != "")
+@router.get("/settings/own-domains")
+def get_own_domains(db: Session = Depends(get_db)):
+    """Domains treated as ours, so blog research never offers them as prospects."""
+    from . import blog_research
+    from .database import Sender
+    auto = set()
+    for snd in db.query(Sender).all():
+        if snd.email and "@" in snd.email:
+            auto.add(snd.email.split("@")[-1].lower())
+    return {"domains": sorted(blog_research._OWN_DOMAINS),
+            "brands": sorted(blog_research._OWN_BRANDS),
+            "from_senders": sorted(auto),
+            "note": "Taken from your senders automatically. Add anything else "
+                    "you own with POST /crm/settings/own-domains?domains=a.com,b.com"}
+
+
+@router.post("/settings/own-domains")
+def set_own_domains_ep(domains: str = "", brands: str = ""):
+    """Add your own sites so they're never picked up as prospects."""
+    from . import blog_research
+    extra = [d.strip() for d in re.split(r"[,\n ]+", domains) if d.strip()]
+    extra_brands = [b.strip() for b in re.split(r"[,\n ]+", brands) if b.strip()]
+    current = set(blog_research._OWN_DOMAINS) | set(extra)
+    current_brands = set(blog_research._OWN_BRANDS) | set(extra_brands)
+    blog_research.set_own_domains(current, brands=current_brands)
+    return {"domains": sorted(blog_research._OWN_DOMAINS),
+            "brands": sorted(blog_research._OWN_BRANDS)}
+
+
+@router.post("/deals/backfill")
+def deals_backfill(mode: str = "", db: Session = Depends(get_db)):
+    """Create deal rows for everyone who has already replied.
+
+    Rows normally appear as replies are detected. This fills in the ones that
+    were marked as replied before the deals sheet existed, so nothing is
+    missing. Prices are filled in on the next reply check, when their
+    conversation is read.
+    """
+    from .crm_models import OutreachEntry, Deal
+    from . import reply_tracker
+
+    q = db.query(OutreachEntry).filter(OutreachEntry.status == "replied")
     if mode:
         q = q.filter(OutreachEntry.mode == mode)
-    n = q.update({"label_state": ""}, synchronize_session=False)
+    rows = q.all()
+
+    created = 0
+    for e in rows:
+        email = (e.email or "").strip().lower()
+        if not email:
+            continue
+        exists = db.query(Deal).filter(Deal.vendor_email == email,
+                                       Deal.mode == e.mode).first()
+        if exists:
+            continue
+        try:
+            reply_tracker._record_deal(db, e, [])
+            created += 1
+        except Exception:
+            db.rollback()
+
+    total = db.query(Deal).count()
+    return {"created": created, "replied_contacts": len(rows), "total_deals": total,
+            "note": "Run a reply check next — it reads each conversation and "
+                    "fills in prices, links and turnaround times."}
+
+
+@router.post("/deals/clean-sites")
+def clean_deal_sites(mode: str = "", db: Session = Depends(get_db)):
+    """Strip junk out of the site lists already on the deals sheet.
+
+    Removes our own domains, IP addresses, link shorteners and anything that
+    isn't really a website — entries that were collected before those checks
+    existed.
+    """
+    from .crm_models import Deal
+    from .deal_parser import _valid_domain, _is_ours
+
+    q = db.query(Deal)
+    if mode:
+        q = q.filter(Deal.mode == mode)
+
+    cleaned = removed = 0
+    for d in q.all():
+        sites = [x.strip().lower().replace("www.", "")
+                 for x in (d.sites or "").split(",") if x.strip()]
+        keep, seen = [], set()
+        for site in sites:
+            if site in seen:
+                continue
+            # always keep the site we actually contacted
+            if site == (d.primary_site or "").lower():
+                seen.add(site); keep.append(site); continue
+            if not _valid_domain(site) or _is_ours(site):
+                removed += 1
+                continue
+            seen.add(site); keep.append(site)
+        primary = (d.primary_site or "").lower()
+        if primary and primary in keep:
+            keep.remove(primary); keep.insert(0, primary)
+        new_val = ",".join(keep)
+        if new_val != (d.sites or ""):
+            d.sites = new_val
+            cleaned += 1
+    db.commit()
+    return {"rows_cleaned": cleaned, "entries_removed": removed,
+            "note": "Our own domains, IPs, shorteners and duplicates are gone."}
+
+
+@router.get("/deals")
+def deals_sheet(mode: str = "", status: str = "", db: Session = Depends(get_db)):
+    """The live deals sheet — one row per vendor, filled in from their replies."""
+    from .crm_models import Deal
+    q = db.query(Deal)
+    if mode:
+        q = q.filter(Deal.mode == mode)
+    if status:
+        q = q.filter(Deal.status == status)
+    rows = q.order_by(Deal.last_reply_at.desc().nullslast()).all()
+
+    def _fmt(d):
+        sites = [x for x in (d.sites or "").split(",") if x]
+        return {
+            "id": d.id, "mode": d.mode,
+            "primary_site": d.primary_site,
+            "sites": sites, "site_count": len(sites),
+            "vendor_email": d.vendor_email, "our_email": d.our_email,
+            "sheet_url": d.sheet_url,
+            "currency": d.currency,
+            "guest_post_price": d.guest_post_price,
+            "link_insert_price": d.link_insert_price,
+            "dofollow_links": d.dofollow_links,
+            "nofollow_links": d.nofollow_links,
+            "tat": d.tat, "sample_url": d.sample_url,
+            "status": d.status,
+            "deal_date": d.deal_date.strftime("%Y-%m-%d") if d.deal_date else "",
+            "last_reply": d.last_reply_at.strftime("%Y-%m-%d %H:%M") if d.last_reply_at else "",
+            "notes": d.notes or "",
+        }
+
+    out = [_fmt(d) for d in rows]
+    return {"deals": out, "total": len(out),
+            "dealing": sum(1 for d in out if d["status"] != "done"),
+            "done": sum(1 for d in out if d["status"] == "done")}
+
+
+@router.post("/deals/{deal_id}/update")
+def update_deal(deal_id: int, field: str = "", value: str = "",
+                db: Session = Depends(get_db)):
+    """Edit one cell of the sheet by hand (prices, links, status, notes...)."""
+    from .crm_models import Deal
+    allowed = {"currency", "guest_post_price", "link_insert_price", "dofollow_links",
+               "nofollow_links", "tat", "sample_url", "sheet_url", "status",
+               "notes", "primary_site", "our_email"}
+    if field not in allowed:
+        return {"error": f"'{field}' can't be edited. Allowed: {sorted(allowed)}"}
+    d = db.get(Deal, deal_id)
+    if not d:
+        return {"error": "Deal not found"}
+    setattr(d, field, value)
+    if field == "status" and value == "done" and not d.deal_date:
+        from datetime import datetime as _dt
+        d.deal_date = _dt.utcnow()
+    db.commit()
+    return {"updated": deal_id, "field": field, "value": value}
+
+
+@router.get("/deals/export")
+def deals_export(mode: str = "", format: str = "csv", db: Session = Depends(get_db)):
+    """Download the deals sheet as CSV or Excel."""
+    from .crm_models import Deal
+    import csv, io
+    from fastapi.responses import StreamingResponse
+
+    q = db.query(Deal)
+    if mode:
+        q = q.filter(Deal.mode == mode)
+    rows = q.order_by(Deal.last_reply_at.desc().nullslast()).all()
+
+    headers = ["Site", "All sites", "Their email", "Our email", "Price list",
+               "Currency", "Guest post", "Link insertion", "Dofollow", "Nofollow",
+               "TAT", "Sample", "Status", "Deal date", "Last reply", "Notes"]
+
+    def row_of(d):
+        return [d.primary_site or "", d.sites or "", d.vendor_email or "",
+                d.our_email or "", d.sheet_url or "", d.currency or "",
+                d.guest_post_price or "", d.link_insert_price or "",
+                d.dofollow_links or "", d.nofollow_links or "", d.tat or "",
+                d.sample_url or "", d.status or "",
+                d.deal_date.strftime("%Y-%m-%d") if d.deal_date else "",
+                d.last_reply_at.strftime("%Y-%m-%d %H:%M") if d.last_reply_at else "",
+                d.notes or ""]
+
+    if format == "xlsx":
+        try:
+            from openpyxl import Workbook
+            wb = Workbook(); ws = wb.active; ws.title = "Deals"
+            ws.append(headers)
+            for d in rows:
+                ws.append(row_of(d))
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+            return StreamingResponse(
+                buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": 'attachment; filename="deals.xlsx"'})
+        except Exception:
+            pass  # fall through to CSV
+
+    buf = io.StringIO(); w = csv.writer(buf)
+    w.writerow(headers)
+    for d in rows:
+        w.writerow(row_of(d))
+    buf.seek(0)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": 'attachment; filename="deals.csv"'})
+
+
+@router.post("/outreach/deal-done")
+def mark_deal_done(email: str = "", mode: str = "", done: bool = True,
+                   db: Session = Depends(get_db)):
+    """Mark a conversation as closed (or reopen it).
+
+    Puts the "Deal Done" label on that thread in Gmail and clears "Dealing".
+    """
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(
+        OutreachEntry.email == (email or "").strip().lower())
+    if mode:
+        q = q.filter(OutreachEntry.mode == mode)
+    rows = q.all()
+    if not rows:
+        return {"updated": 0, "error": f"No contact found for '{email}'."}
+
+    for e in rows:
+        e.deal_stage = "done" if done else ("dealing" if e.status == "replied" else "")
+        e.label_target = f"{e.mode}:{'done' if done else 'dealing'}"
+        e.label_state = ""            # queue it for re-labelling
     db.commit()
     try:
         from . import gmail_labels
         gmail_labels.kick()
     except Exception:
         pass
-    return {"queued_for_relabel": n,
-            "note": "The label worker will re-tag these within ~15 seconds."}
+    return {"updated": len(rows), "email": email,
+            "stage": "done" if done else "reopened",
+            "note": "Gmail label updates within a few seconds."}
+
+
+@router.get("/outreach/deals")
+def list_deals(mode: str = "", db: Session = Depends(get_db)):
+    """Conversations that are live or closed — the ones worth your attention."""
+    from .crm_models import OutreachEntry
+    q = db.query(OutreachEntry).filter(
+        (OutreachEntry.status == "replied") | (OutreachEntry.deal_stage != ""))
+    if mode:
+        q = q.filter(OutreachEntry.mode == mode)
+    rows = q.order_by(OutreachEntry.replied_at.desc()).limit(500).all()
+    return {"deals": [{"email": e.email, "domain": e.domain, "mode": e.mode,
+                       "sender": e.sender_email,
+                       "stage": (e.deal_stage or ("dealing" if e.status == "replied" else "")),
+                       "replied_at": e.replied_at.isoformat() if e.replied_at else ""}
+                      for e in rows],
+            "dealing": sum(1 for e in rows if (e.deal_stage or "") != "done"),
+            "done": sum(1 for e in rows if (e.deal_stage or "") == "done")}
+
+
+@router.post("/labels/relabel")
+def labels_relabel(mode: str = "", db: Session = Depends(get_db)):
+    """Re-tag every message we've sent with the label its thread deserves now.
+
+    Works out the right stage for each one — first email, follow-up N, replied
+    ("Dealing"), or closed ("Deal Done") — then queues it for the label worker.
+    """
+    from .crm_models import OutreachEntry
+
+    q = db.query(OutreachEntry).filter(OutreachEntry.message_id != "")
+    if mode:
+        q = q.filter(OutreachEntry.mode == mode)
+    rows = q.all()
+
+    counts = {"base": 0, "followup": 0, "dealing": 0, "done": 0}
+    for e in rows:
+        if (e.deal_stage or "") == "done":
+            stage, bucket = "done", "done"
+        elif e.status == "replied":
+            stage, bucket = "dealing", "dealing"
+        elif (e.followup_count or 0) > 0:
+            stage, bucket = str(e.followup_count), "followup"
+        else:
+            stage, bucket = "0", "base"
+        e.label_target = f"{e.mode}:{stage}"
+        e.label_state = ""          # queue it
+        counts[bucket] += 1
+    db.commit()
+
+    # Anything sent before message-ids were recorded can't be found in Gmail
+    unlabelable = db.query(OutreachEntry).filter(
+        (OutreachEntry.message_id == "") | (OutreachEntry.message_id.is_(None)))
+    if mode:
+        unlabelable = unlabelable.filter(OutreachEntry.mode == mode)
+    missing = unlabelable.count()
+
+    try:
+        from . import gmail_labels
+        gmail_labels.kick()
+    except Exception:
+        pass
+
+    return {"queued_for_relabel": len(rows), "breakdown": counts,
+            "cannot_label": missing,
+            "note": "Labels are applied in the background — a few hundred a minute. "
+                    "Messages sent before the app started recording Gmail message "
+                    "ids can't be located, so they're skipped."}
 
 
 @router.get("/labels/status")
@@ -1128,7 +1424,7 @@ def check_blog_sites(sites: str = ""):
     (MSN, Yahoo, Forbes...) and unreachable sites so the user doesn't waste time.
     Returns a per-site verdict."""
     from . import blog_research
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
     site_list = [s.strip() for s in re.split(r"[,\n]", sites) if s.strip()]
     if not site_list:
         return {"results": [], "total": 0, "warnings": 0, "all_ok": True}
@@ -1142,8 +1438,38 @@ def check_blog_sites(sites: str = ""):
             return {"site": site, "ok": True, "reason": "check_failed",
                     "hint": f"Couldn't pre-check '{site}' ({e}). Research will still try it."}
 
-    with ThreadPoolExecutor(max_workers=min(12, len(site_list))) as ex:
-        results = list(ex.map(_one, site_list))
+    # HARD CAP: this is only a sanity check, so it must never hold the user up.
+    # Whatever hasn't answered within the budget is simply treated as fine —
+    # research will try it anyway.
+    # Every site is checked at once, so the whole thing is bounded by the
+    # SLOWEST site, not the sum. A generous budget means all sites report in
+    # one go — previously slow ones timed out and only surfaced on the next
+    # attempt, which felt like errors arriving one at a time.
+    BUDGET = 40
+    results = []
+    ex = ThreadPoolExecutor(max_workers=min(50, len(site_list)))
+    try:
+        futures = {ex.submit(_one, site): site for site in site_list}
+        done, not_done = wait(futures.keys(), timeout=BUDGET)
+        for f in done:
+            try:
+                results.append(f.result())
+            except Exception:
+                results.append({"site": futures[f], "ok": True, "reason": "check_failed",
+                                "hint": ""})
+        for f in not_done:
+            f.cancel()
+            results.append({"site": futures[f], "ok": True, "reason": "check_timeout",
+                            "hint": ""})
+        if not_done:
+            print(f"[BlogResearch] Pre-check: {len(not_done)} site(s) were slow to "
+                  f"respond — skipping the check for them.")
+    finally:
+        ex.shutdown(wait=False)
+
+    # keep the original order so the list reads predictably
+    order = {s: i for i, s in enumerate(site_list)}
+    results.sort(key=lambda r: order.get(r["site"], 999))
 
     warnings = sum(1 for r in results if not r.get("ok"))
     return {"results": results, "total": len(site_list),
@@ -1179,10 +1505,24 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
     job = db.get(BlogResearchJob, job_id)
     if not job:
         return {"error": "Job not found"}
-    if job_id in _blog_threads:
-        return {"error": "Already running"}
+    # Only refuse if a run is ACTUALLY still going. A leftover entry from a
+    # finished or crashed run used to make Start silently do nothing.
+    existing = _blog_threads.get(job_id)
+    if existing is not None:
+        if existing.is_alive():
+            return {"error": "Already running"}
+        _blog_threads.pop(job_id, None)
 
     _blog_stop[job_id] = {"stop": False}
+
+    # Flip the status straight away so the UI shows progress immediately instead
+    # of sitting on "pending" until the background thread gets going.
+    try:
+        job.status = "running"
+        job.phase = "articles"
+        db.commit()
+    except Exception:
+        db.rollback()
 
     def _run():
         bg = None
@@ -1195,13 +1535,6 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
 
         # Collected across every site so we can explain the result afterwards
         run_stats = {}
-
-        # Tell the extractor which domains we're researching, so a link pointing
-        # back at one of them is never offered as a prospect.
-        try:
-            blog_research.set_source_sites(sites)
-        except Exception:
-            pass
 
         # Thread-safe dedup: parallel workers reserve an email here BEFORE the
         # DB insert, so two workers scraping the same email can't both add it.
@@ -1303,6 +1636,32 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
             j.articles_found = 0; j.emails_found = 0; j.phase = "articles"
             bg.commit()
             sites = [s for s in j.sites.split(",") if s]
+            # Tell the extractor which domains we're researching, so a link
+            # pointing back at one of them is never offered as a prospect.
+            try:
+                blog_research.set_source_sites(sites)
+            except Exception:
+                pass
+
+            # And our OWN domains — the company site plus every sender's domain.
+            # These appear in signatures and footers constantly; they are not leads.
+            try:
+                from .database import Sender as _S
+                from .config import settings as _cfg
+                own = set()
+                for snd in bg.query(_S).all():
+                    if snd.email and "@" in snd.email:
+                        own.add(snd.email.split("@")[-1].lower())
+                for extra in (getattr(_cfg, "SENDING_DOMAIN", ""),
+                              getattr(_cfg, "PUBLIC_URL", "")):
+                    if extra:
+                        own.add(extra)
+                blog_research.set_own_domains(own)
+                if own:
+                    print(f"[BlogResearch] Ignoring our own domains: "
+                          f"{', '.join(sorted(d for d in blog_research._OWN_DOMAINS))}")
+            except Exception as oe:
+                print(f"[BlogResearch] Could not read our own domains: {oe}")
             seen_domains = set()  # global dedupe across all sites
 
             for site in sites:
@@ -1371,6 +1730,20 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 if run_stats.get("too_old"):     bits.append(f"{run_stats['too_old']} were outside the {j.time_range} window")
                 if run_stats.get("unreachable"): bits.append(f"{run_stats['unreachable']} wouldn't load")
                 if run_stats.get("blocked"):     bits.append(f"{run_stats['blocked']} were blocked by the site")
+                # If nothing was found, say what was actually on those pages —
+                # otherwise "0 links" tells the user nothing they can act on.
+                ex = run_stats.get("no_link_examples") or []
+                if ex and not run_stats.get("ok"):
+                    e0 = ex[0]
+                    if e0.get("external", 0) > 0:
+                        bits.append(f"pages had {e0['external']} outbound link(s) but "
+                                    f"all were filtered out")
+                    elif e0.get("anchors", 0) == 0:
+                        bits.append("article pages came back empty (likely rendered "
+                                    "by JavaScript, or bot-blocked)")
+                    else:
+                        bits.append(f"articles had {e0.get('anchors', 0)} link(s), none "
+                                    f"pointing to other sites")
                 j.summary = " · ".join(bits)
                 if j.summary:
                     print(f"[BlogResearch] Job {job_id} summary: {j.summary}")

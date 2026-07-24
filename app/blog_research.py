@@ -128,13 +128,18 @@ def check_site(site):
         return {"ok": False, "reason": "invalid_url",
                 "hint": "That doesn't look like a valid website. Enter a domain like 'techbullion.com'."}
 
-    # Known non-blog / aggregator?
+    # A handful of huge aggregators genuinely can't be crawled (MSN, Yahoo...).
+    # Everything else is fair game — we research whatever the user gives us.
+    #
+    # NOTE: _is_skip() is deliberately NOT used here. That list decides which
+    # link TARGETS are worth pitching, and it also holds the sites currently
+    # being researched — using it here made the tool refuse the user's own
+    # research sites ("techbullion.com is a giant news portal").
     bare = root.replace("www.", "")
-    if bare in NOT_BLOG_SITES or _is_skip(root):
-        return {"ok": False, "reason": "not_a_blog",
-                "hint": f"'{bare}' is a giant news portal / aggregator, not a guest-post site. "
-                        "It doesn't accept guest posts and has no standard sitemap. "
-                        "Target smaller niche blogs instead (the kind that publish sponsored/guest articles)."}
+    if bare in NOT_BLOG_SITES:
+        return {"ok": True, "reason": "large_portal",
+                "hint": f"'{bare}' is a very large portal, so it may return few "
+                        "guest-post prospects. We'll still crawl it."}
 
     # Can we even reach it? This is only a sanity check before the real run, so
     # it uses short timeouts and few requests — a slow check that makes the user
@@ -142,18 +147,21 @@ def check_site(site):
     # Sites are checked in parallel, so a generous timeout costs nothing overall
     # — and it stops a merely-slow site being reported as dead.
     base = "https://" + root
-    html = _fetch(base, timeout=10)
+    html = _fetch_check(base, timeout=10)
     if not html:
-        html = _fetch("http://" + root, timeout=8)
+        html = _fetch_check("http://" + root, timeout=8)
     if not html:
-        return {"ok": False, "reason": "unreachable",
-                "hint": f"Couldn't load '{bare}'. It may be down, blocking bots, or behind heavy protection."}
+        # Advisory only. Plenty of sites block a bare pre-check but crawl fine
+        # during the real run, so this must never stop the job.
+        return {"ok": True, "reason": "slow_or_protected",
+                "hint": f"'{bare}' didn't respond to the quick check — it may be slow "
+                        "or bot-protected. We'll still try it."}
 
     # Does it have a sitemap? (best signal it's a real, crawlable blog)
     # Two probes is enough here — the real run tries every variant.
     has_sitemap = False
     for sm in ["/sitemap.xml", "/post-sitemap.xml"]:
-        if _fetch(base + sm, timeout=6):
+        if _fetch_check(base + sm, timeout=6):
             has_sitemap = True
             break
 
@@ -188,9 +196,31 @@ HEADERS = {
 # faster than opening a new TCP+TLS handshake for every single article fetch.
 _session = requests.Session()
 _session.headers.update(HEADERS)
-_adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=1)
+# Pool must comfortably exceed the worker count, otherwise threads queue up
+# waiting for a free connection instead of doing work.
+_adapter = requests.adapters.HTTPAdapter(pool_connections=120, pool_maxsize=120, max_retries=1)
 _session.mount("https://", _adapter)
 _session.mount("http://", _adapter)
+
+# A SEPARATE session for the pre-flight site check. Sharing the pool with a
+# running research job meant the check sat waiting for a free connection —
+# which looked like "Checking sites..." hanging for minutes.
+_check_session = requests.Session()
+_check_session.headers.update(HEADERS)
+_check_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+_check_session.mount("https://", _check_adapter)
+_check_session.mount("http://", _check_adapter)
+
+
+def _fetch_check(url, timeout=8):
+    """Fetch used only by check_site — never blocked by a running research job."""
+    try:
+        r = _check_session.get(url, timeout=timeout, allow_redirects=True)
+        if r.status_code == 200:
+            return _decode_body(r)
+    except Exception:
+        pass
+    return None
 
 
 def _root(url):
@@ -202,6 +232,29 @@ def _root(url):
 
 def _is_skip(domain):
     d = domain.lower().replace("www.", "")
+
+    # A bare IP address is never a guest-post prospect — it's usually a tracking
+    # pixel, a CDN node or a misparsed link.
+    if re.match(r"^\d{1,3}(?:\.\d{1,3}){1,3}$", d):
+        return True
+    # Not a real hostname
+    if "." not in d or d.endswith("."):
+        return True
+    # localhost / internal addresses
+    if d in ("localhost", "127.0.0.1") or d.endswith(".local"):
+        return True
+
+    # Our own domains — the company site and every sender's domain. Linking to
+    # ourselves is not a lead.
+    for own in _OWN_DOMAINS:
+        if d == own or d.endswith("." + own):
+            return True
+    # ...and anything built on one of our brand names, whatever the extension
+    # (bradvertisers.com, bradvertisers.co.uk, blog.bradvertisers.net ...)
+    labels = d.split(".")
+    for brand in _OWN_BRANDS:
+        if brand in labels:
+            return True
     # 1) Exact domain or subdomain match against SKIP_DOMAINS
     if any(d == s or d.endswith("." + s) for s in SKIP_DOMAINS):
         return True
@@ -232,6 +285,48 @@ def _is_skip(domain):
 
 # Sites currently being researched. Links pointing back at them are ignored.
 _SOURCE_SITES = set()
+
+# Our own domains: the company website plus every sender's domain. These turn
+# up in email footers and signatures all the time, and they're never prospects.
+_OWN_DOMAINS = set()
+
+
+# Brand words taken from our own addresses (e.g. "bradvertisers" out of
+# hira.bradvertisers@gmail.com). Any domain built on one of these is ours.
+_OWN_BRANDS = set()
+
+
+def set_own_domains(domains, brands=None):
+    """Register what belongs to us, so it's never offered back as a prospect."""
+    _OWN_DOMAINS.clear()
+    _OWN_BRANDS.clear()
+    token_counts = {}
+    for d in domains or []:
+        d = (d or "").strip().lower().replace("www.", "")
+        if "@" in d:
+            local, d = d.split("@")[0], d.split("@")[-1]
+            # A free-mail address says nothing about the domain, but the local
+            # part often carries the brand: hira.bradvertisers@gmail.com
+            for tok in re.split(r"[.\-_+]", local):
+                if len(tok) >= 5 and not tok.isdigit():
+                    token_counts[tok] = token_counts.get(tok, 0) + 1
+        d = re.sub(r"^https?://", "", d).split("/")[0]
+        if d and "." in d:
+            _OWN_DOMAINS.add(d)
+
+    # Only a word shared by SEVERAL of our addresses is the company name.
+    # A word used once is a person ("marita"), and blocking that could throw
+    # away a real prospect with the same name.
+    for tok, n in token_counts.items():
+        if n >= 2:
+            _OWN_BRANDS.add(tok)
+    for b in brands or []:
+        b = (b or "").strip().lower()
+        if len(b) >= 4:
+            _OWN_BRANDS.add(b)
+    # Free providers are already skipped elsewhere; keep them out of "ours"
+    _OWN_DOMAINS.discard("gmail.com")
+    _OWN_DOMAINS.discard("googlemail.com")
 
 
 def set_source_sites(sites):
@@ -409,27 +504,47 @@ def _date_from_html(html):
     return None
 
 
+# Cloudflare's "checking your browser" interstitial comes back as 200 OK with
+# almost no content. Because it wasn't recognised, every one of those pages was
+# counted as "an article with no links" — which is why a site could report
+# hundreds of articles and zero links.
+CHALLENGE_MARKERS = (
+    "just a moment", "checking your browser", "cf-browser-verification",
+    "cf_chl_opt", "cf_chl_jschl", "challenge-platform", "__cf_chl",
+    "enable javascript and cookies to continue", "verifying you are human",
+    "ddos protection by", "please turn javascript on",
+    "attention required", "access denied", "error 1015", "error 1020",
+    "you are being rate limited", "request blocked",
+)
+
+
 def _is_cloudflare_blocked(html):
-    """Detect Cloudflare access-denied / rate-limit (error 1015, 1020 etc.)."""
+    """True when the page is a bot check / block page rather than real content."""
     if not html:
         return False
-    low = html.lower()
-    return ("cloudflare" in low and
-            ("error 1015" in low or "error 1020" in low or "access denied" in low
-             or "rate limited" in low or "you are being rate limited" in low
-             or "attention required" in low))
+    low = html[:6000].lower()          # markers always appear near the top
+    if any(m in low for m in CHALLENGE_MARKERS):
+        return True
+    # A near-empty page that only ships scripts is a challenge shell too
+    if len(html) < 2500 and "<script" in low and low.count("<a ") <= 1:
+        return True
+    return False
 
 
 # Publish date read out of each article's own HTML, used when the sitemap
 # didn't provide one.
 _last_article_date = {}
 
+# A few examples of articles that produced no links, with what was actually on
+# the page. Used to explain a zero result instead of leaving it a mystery.
+_no_link_samples = []
+
 # Which section each article was found under, filled by the most recent
 # _find_articles() call and read by research_site().
 _last_categories = {}
 
 
-def _find_articles(site, max_articles=30, time_range="1m"):
+def _find_articles(site, max_articles=30, time_range="1m", workers=50):
     """Find recent article URLs from a blog site within the time range.
     Prefers sitemap (real dated posts, newest-first). Filters out articles
     older than the cutoff using sitemap <lastmod> dates and URL-embedded dates."""
@@ -463,21 +578,16 @@ def _find_articles(site, max_articles=30, time_range="1m"):
     # sitemaps (post-sitemap.xml, post-sitemap2.xml, post-sitemap3.xml...).
     # In Yoast, HIGHER numbers usually hold the NEWEST posts. We gather from the
     # sitemap index if present, PLUS follow numbered sitemaps until they run out.
+    # Index files and the numbered sitemaps are probed in the SAME batch.
+    # Waiting for the index first, then starting the numbered probe, then the
+    # listing pages, meant three sequential waits per site — most of the time
+    # was spent waiting rather than working.
     index_urls = ["/sitemap_index.xml", "/sitemap.xml", "/wp-sitemap.xml"]
     post_sitemaps = []
-    for ix in index_urls:
-        ix_html = _fetch(base + ix)
-        if not ix_html:
-            continue
-        ix_entries = _parse_sitemap_entries(ix_html)
-        subs = [u for u, _ in ix_entries if u.endswith(".xml")
-                and any(k in u.lower() for k in ["post", "article", "news", "blog"])]
-        if subs:
-            post_sitemaps = subs
-            break
 
-    # If the index didn't list post sitemaps, probe numbered ones directly.
-    if not post_sitemaps:
+    # Always probe the numbered sitemaps as well — cheap now that everything
+    # runs together, and it covers sites whose index is missing or stale.
+    if True:
         # Probe forward: post-sitemap.xml, post-sitemap2..post-sitemap40.
         # Collect ALL that exist (don't stop at first gap — some sites skip numbers).
         candidates = [base + "/post-sitemap.xml"]
@@ -498,20 +608,78 @@ def _find_articles(site, max_articles=30, time_range="1m"):
         return int(m.group(1)) if m else (1 if "post-sitemap.xml" in u else 0)
     post_sitemaps = sorted(set(post_sitemaps), key=_sm_sort_key, reverse=True)
 
+    # Fetch the candidate sitemaps IN PARALLEL. Probing up to forty of them one
+    # after another was the single slowest step — on a site with no numbered
+    # sitemaps it burned minutes before a single article was read.
+    # index files first, then the numbered guesses
+    post_sitemaps = [base + ix for ix in index_urls] + post_sitemaps
+    # de-dupe while keeping order
+    seen_sm = set()
+    post_sitemaps = [u for u in post_sitemaps
+                     if not (u in seen_sm or seen_sm.add(u))][:45]
     all_entries = []
-    fetched_ok = 0
-    for sm in post_sitemaps:
-        sm_html = _fetch(sm)
-        if not sm_html:
-            continue
-        ents = _parse_sitemap_entries(sm_html)
-        ents = [(u, m) for u, m in ents if not u.endswith(".xml")]
-        if ents:
-            all_entries.extend(ents)
-            fetched_ok += 1
-        # Once we have plenty AND have read a few sitemaps, stop (enough to sort)
-        if len(all_entries) >= max_articles * 30 and fetched_ok >= 2:
-            break
+
+    def _grab_sitemap(url):
+        html = _fetch(url, timeout=7)
+        if not html:
+            return []
+        ents = _parse_sitemap_entries(html)
+        arts = [(u, m) for u, m in ents if not u.endswith(".xml")]
+        if arts:
+            return arts
+        # It's an index — follow the post/news sub-sitemaps it points at.
+        subs = [u for u, _ in ents if u.endswith(".xml")
+                and any(k in u.lower() for k in ["post", "article", "news", "blog"])]
+
+        # Take the HIGHEST-numbered ones first. Big WordPress sites split posts
+        # across post-sitemap1..40, and the LOW numbers hold the OLDEST posts.
+        # Reading them in document order meant loading 2016 archives and then
+        # discarding them all as "outside the time window".
+        def _num(u):
+            m = re.search(r"(\d+)\.xml", u)
+            return int(m.group(1)) if m else 0
+        subs.sort(key=_num, reverse=True)
+        subs = subs[:12]
+
+        out = []
+        for sub in subs:
+            sub_html = _fetch(sub, timeout=7)
+            if sub_html:
+                out.extend((u, m) for u, m in _parse_sitemap_entries(sub_html)
+                           if not u.endswith(".xml"))
+        return out
+
+    # NOTE: no `with` block here on purpose. Exiting a ThreadPoolExecutor
+    # context waits for EVERY submitted task, so one hanging site could stall
+    # the whole run even though we set a timeout. Shutting down without waiting
+    # keeps things moving.
+    # Kick off the listing pages (homepage, /blog, /news ...) in the SAME batch
+    # as the sitemaps, so the two no longer wait for each other.
+    early_listing = [(base, "Home"), (base + "/blog", "Blog"), (base + "/news", "News"),
+                     (base + "/articles", "Articles"), (base + "/insights", "Insights"),
+                     (base + "/resources", "Resources"), (base + "/posts", "Posts")]
+    ex = ThreadPoolExecutor(max_workers=min(workers, len(post_sitemaps) + len(early_listing)))
+    early_pages = []
+    try:
+        listing_futs = {ex.submit(_fetch, url, 6): (url, label)
+                        for url, label in early_listing}
+        futs = [ex.submit(_grab_sitemap, sm) for sm in post_sitemaps]
+        for f in as_completed(futs, timeout=20):
+            try:
+                all_entries.extend(f.result())
+            except Exception:
+                continue
+    except Exception:
+        pass   # take whatever came back in time
+        # collect whatever the listing fetches produced
+        for f, (url, label) in listing_futs.items():
+            try:
+                early_pages.append((url, label, f.result(timeout=1)))
+            except Exception:
+                continue
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    print(f"[BlogResearch] {root}: sitemaps gave {len(all_entries)} url(s)")
 
     if all_entries:
         all_entries.sort(key=lambda x: x[1] or "0", reverse=True)
@@ -588,13 +756,14 @@ def _find_articles(site, max_articles=30, time_range="1m"):
                 break
         return got
 
-    def _find_category_pages(page_url):
+    def _find_category_pages(page_url, html=None):
         """Read the site's own navigation and return its category/section pages.
 
         Rather than guessing which sections a site has, this takes them from the
         menu the site actually shows (CELEBRITY, TECH, BUSINESS, NEWS ...).
         """
-        html = _fetch(page_url, timeout=8)
+        if html is None:
+            html = _fetch(page_url, timeout=6)
         if not html:
             return []
         try:
@@ -626,28 +795,64 @@ def _find_articles(site, max_articles=30, time_range="1m"):
         return cats[:14]          # a sane cap
 
     if len(articles) < max_articles:
-        # 1) the obvious listing pages
-        listing_pages = [(base, ""), (base + "/blog", "Blog"), (base + "/news", "News"),
-                         (base + "/articles", "Articles"), (base + "/insights", "Insights"),
-                         (base + "/resources", "Resources"), (base + "/posts", "Posts")]
-        # 2) plus every section the site lists in its own menu
+        # The homepage and the obvious listing pages were already fetched
+        # alongside the sitemaps — reuse them instead of downloading again.
+        pages = [p for p in early_pages if p[2]]
+        home_html = next((h for (u, l, h) in early_pages if u == base and h), None)
+
+        # Sections the site lists in its own menu (read from the homepage we
+        # already have, so this costs no extra request).
+        listing_pages = []
         try:
-            listing_pages += _find_category_pages(base)
+            listing_pages = _find_category_pages(base, html=home_html)[:20]
         except Exception:
             pass
 
-        for page_url, label in listing_pages:
+        # Fetch every listing page AT ONCE. Doing this one at a time meant ~20
+        # sequential page loads per site before a single article was read — on
+        # several sites that alone took many minutes.
+        def _grab(item):
+            page_url, label = item
+            html = _fetch(page_url, timeout=6)
+            return (page_url, label, html)
+
+        ex2 = ThreadPoolExecutor(max_workers=max(1, min(workers, len(listing_pages))))
+        try:
+            if not listing_pages:
+                raise StopIteration
+            futs = [ex2.submit(_grab, it) for it in listing_pages]
+            for f in as_completed(futs, timeout=20):
+                try:
+                    pages.append(f.result())
+                except Exception:
+                    continue
+        except Exception:
+            pass  # whatever arrived in time is enough
+        finally:
+            ex2.shutdown(wait=False, cancel_futures=True)
+
+        for page_url, label, html in pages:
             if len(articles) >= max_articles:
                 break
+            if not html:
+                continue
             try:
-                before = set(u for u, _ in articles)
-                _harvest(page_url)
-                # remember which section each new article came from
-                for u, _d in articles:
-                    if u not in before and u not in article_category:
-                        article_category[u] = label or "Home"
+                soup = BeautifulSoup(html, "html.parser")
             except Exception:
                 continue
+            for a in soup.find_all("a", href=True):
+                full = urljoin(page_url, a["href"])
+                if _root(full) != root:
+                    continue
+                path = urlparse(full).path.strip("/")
+                if not path or not _looks_like_article(path):
+                    continue
+                before = len(articles)
+                _add(full)
+                if len(articles) > before:
+                    article_category[articles[-1][0]] = label
+                if len(articles) >= max_articles:
+                    break
 
     # 3. SAFETY NET — if the date filter dropped EVERYTHING but the sitemap did
     # have posts, take the newest ones anyway (better to show recent posts than
@@ -787,6 +992,19 @@ def _extract_external_links(article_url, cutoff=None):
             found.append((bare_target, href.split("#")[0]))
         return found
 
+    # Diagnostics for the "no links" case — recorded so the run can explain
+    # itself instead of silently reporting zero.
+    try:
+        _all_a = soup.find_all("a", href=True)
+        _ext = [a for a in _all_a if a["href"].startswith("http")
+                and _root(a["href"]) and _root(a["href"]).replace("www.", "")
+                != root.replace("www.", "")]
+        _diag = {"anchors": len(_all_a), "external": len(_ext),
+                 "container": (body.name if body is not soup else "whole-page"),
+                 "samples": [a["href"][:70] for a in _ext[:4]]}
+    except Exception:
+        _diag = {}
+
     links = _collect(body)
 
     # FALLBACK 1: the chosen container gave nothing — re-scan the cleaned page.
@@ -804,7 +1022,12 @@ def _extract_external_links(article_url, cutoff=None):
             t.decompose()
         links = _collect(raw)
 
-    return links, ("ok" if links else "no_links")
+    if not links:
+        # remember the first few so the summary can show what was on the page
+        if len(_no_link_samples) < 3:
+            _no_link_samples.append({"url": article_url, **_diag})
+        return links, "no_links"
+    return links, "ok"
 
 
 def research_site(site, time_range="1m", max_articles=30, workers=10,
@@ -817,7 +1040,7 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
     results = []
     if should_stop and should_stop():
         return results
-    article_pairs = _find_articles(site, max_articles, time_range)
+    article_pairs = _find_articles(site, max_articles, time_range, workers=workers)
     categories = dict(_last_categories)   # snapshot before the next site runs  # list of (url, date)
     global_seen_domains = set()
     counter = [0]
@@ -829,6 +1052,7 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
     # Why articles produced nothing — so "0 links" can be explained
     stats = {"ok": 0, "no_links": 0, "too_old": 0, "unreachable": 0,
              "blocked": 0, "stopped": 0}
+    _no_link_samples.clear()
 
     def _do_article(pair):
         article, date_str = pair
@@ -837,9 +1061,14 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
         links, reason = _extract_external_links(article, cutoff)
         return (article, date_str, links, reason)
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    print(f"[BlogResearch] {_root(site)}: reading {len(article_pairs)} article(s) "
+          f"with {workers} workers")
+    # Hard ceiling per site so one slow site can never stall the whole job.
+    ARTICLE_BUDGET = 180  # seconds
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = [ex.submit(_do_article, p) for p in article_pairs]
-        for fut in as_completed(futures):
+        for fut in as_completed(futures, timeout=ARTICLE_BUDGET):
             # Stop fast: as soon as the flag is set, stop collecting results
             if should_stop and should_stop():
                 for f in futures:
@@ -883,6 +1112,22 @@ def research_site(site, time_range="1m", max_articles=30, workers=10,
                 if on_link:
                     try: on_link(link_data)
                     except Exception: pass
+    except Exception as e:
+        print(f"[BlogResearch] {_root(site)}: stopped reading early ({type(e).__name__}) "
+              f"— moving on with what was collected")
+    finally:
+        # Don't wait on stragglers — a single unresponsive article shouldn't
+        # hold up the rest of the run.
+        ex.shutdown(wait=False, cancel_futures=True)
+
+    for smp in _no_link_samples:
+        print(f"[BlogResearch]   no-links example: {smp.get('url','')}")
+        print(f"[BlogResearch]     anchors={smp.get('anchors')} external={smp.get('external')} "
+              f"container={smp.get('container')}")
+        for ex in smp.get("samples", []):
+            print(f"[BlogResearch]     saw: {ex}")
+    if _no_link_samples and isinstance(on_stats, dict):
+        on_stats["no_link_examples"] = list(_no_link_samples)
 
     print(f"[BlogResearch] {_root(site)}: {stats['ok']} article(s) with links, "
           f"{stats['no_links']} with none, {stats['too_old']} outside the time range, "

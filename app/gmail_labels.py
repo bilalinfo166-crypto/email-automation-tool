@@ -32,7 +32,12 @@ LABEL_COLORS = {
     "Follow Up 3":        {"backgroundColor": "#f691b3", "textColor": "#ffffff"},  # pink
     "Follow Up 4":        {"backgroundColor": "#fb4c2f", "textColor": "#ffffff"},  # red
     "Blog Research":      {"backgroundColor": "#2da2bb", "textColor": "#ffffff"},  # teal
+    "Dealing":            {"backgroundColor": "#ffd6a0", "textColor": "#7a4706"},  # amber
+    "Deal Done":          {"backgroundColor": "#16a766", "textColor": "#ffffff"},  # green
 }
+
+# Every follow-up label, so a thread that moves on can have them all cleared
+ALL_FOLLOWUPS = [f"Follow Up {i}" for i in range(1, 5)]
 
 BASE_LABEL = {
     "vendor": "AI Vendor Outreach",
@@ -45,12 +50,44 @@ BASE_LABEL = {
 OLD_LABELS = {"blog": ["AI Client Hunting"]}
 
 
-def labels_for(mode: str, followup_count: int) -> tuple:
-    """(labels to add, labels to remove) for this message."""
+def _stage_of(entry) -> str:
+    """Where this conversation has got to."""
+    if (getattr(entry, "deal_stage", "") or "").lower() == "done":
+        return "done"
+    if (entry.status or "") == "replied":
+        return "dealing"
+    return ""
+
+
+def labels_for(mode: str, followup_count: int, stage: str = "") -> tuple:
+    """(labels to add, labels to remove) for this message.
+
+    A thread moves through stages, and the labels follow it:
+        first email            -> base label
+        follow-up 1..4         -> base + "Follow Up N"  (previous one removed)
+        they replied           -> base + "Dealing"      (follow-ups cleared)
+        deal closed            -> base + "Deal Done"    ("Dealing" cleared)
+    """
     m = (mode or "vendor").lower()
     base = BASE_LABEL.get(m, BASE_LABEL["vendor"])
     add = [base]
     remove = list(OLD_LABELS.get(m, []))   # clear any label this mode used before
+    stage = (stage or "").lower()
+
+    if stage == "done":
+        # Closed — the chase is over, so drop everything that implied it wasn't.
+        add.append("Deal Done")
+        remove.append("Dealing")
+        remove.extend(ALL_FOLLOWUPS)
+        return add, remove
+
+    if stage == "dealing":
+        # They replied. No more "waiting on them" labels.
+        add.append("Dealing")
+        remove.extend(ALL_FOLLOWUPS)
+        remove.append("Deal Done")
+        return add, remove
+
     n = int(followup_count or 0)
     if n > 0:
         add.append(f"Follow Up {n}")
@@ -170,24 +207,33 @@ def apply_via_imap(mail, message_id: str, add_names, remove_names) -> bool:
 
 # ---------------- The worker that does it in bulk ----------------
 
-def label_pending(db, limit: int = 300) -> dict:
+def label_pending(db, limit: int = 300, backfill: bool = False) -> dict:
     """Label every recently-sent message that hasn't been labelled yet.
 
     Runs in bulk, one connection per sender, so sending itself is never slowed
     down by label calls.
     """
-    cutoff = datetime.utcnow() - timedelta(days=7)
-    # A follow-up to an OLD contact is itself a recent message, so we must look
-    # at the most recent activity (follow-up date), not just the first send.
-    pending = db.query(OutreachEntry).filter(
+    # Normally only recent mail is worth checking, but after a bulk relabel the
+    # whole history needs doing — so age is only used as a filter when there's
+    # nothing older already queued.
+    q = db.query(OutreachEntry).filter(
         OutreachEntry.message_id != "",
         OutreachEntry.label_state != OutreachEntry.label_target,
-        or_(
+    )
+    if not backfill:
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        # A follow-up to an OLD contact is itself a recent message, so look at
+        # the most recent activity, not just the first send.
+        q = q.filter(or_(
             OutreachEntry.last_followup_at >= cutoff,
             and_(OutreachEntry.last_followup_at.is_(None),
                  OutreachEntry.sent_at >= cutoff),
-        ),
-    ).limit(limit).all()
+        ))
+    pending = q.order_by(OutreachEntry.sent_at.desc()).limit(limit).all()
+
+    # Nothing recent left to do? Then pick up the older backlog.
+    if not pending and not backfill:
+        return label_pending(db, limit=limit, backfill=True)
 
     if not pending:
         return {"labelled": 0, "pending": 0}
@@ -199,6 +245,7 @@ def label_pending(db, limit: int = 300) -> dict:
 
     senders = {s.email: s for s in db.query(Sender).all()}
     done = failed = 0
+    skipped_missing = 0      # messages that are simply no longer in the mailbox
 
     for sender_email, entries in by_sender.items():
         s = senders.get(sender_email)
@@ -217,7 +264,7 @@ def label_pending(db, limit: int = 300) -> dict:
                 continue
             try:
                 for e in entries:
-                    add, remove = labels_for(e.mode, e.followup_count)
+                    add, remove = labels_for(e.mode, e.followup_count, _stage_of(e))
                     if apply_via_imap(mail, e.message_id, add, remove):
                         e.label_state = e.label_target
                         _sender_errors.pop(sender_email, None)
@@ -239,7 +286,7 @@ def label_pending(db, limit: int = 300) -> dict:
             if not creds:
                 continue
             for e in entries:
-                add, remove = labels_for(e.mode, e.followup_count)
+                add, remove = labels_for(e.mode, e.followup_count, _stage_of(e))
                 try:
                     # gmail_id may be blank for older sends — apply_via_api then
                     # finds the message by its Message-ID instead of skipping it.
@@ -261,9 +308,37 @@ def label_pending(db, limit: int = 300) -> dict:
                     else:
                         failed += 1
                 except Exception as ex:
-                    failed += 1
                     msg = str(ex)
-                    if "insufficient" in msg.lower() or "scope" in msg.lower():
+                    low = msg.lower()
+
+                    # The stored Gmail id no longer resolves (message deleted,
+                    # or the id came from an older connection). Drop the stale
+                    # id and try once more by Message-ID. If it still can't be
+                    # found, stop chasing it — otherwise this retries every 15
+                    # seconds forever and floods the log.
+                    if "404" in msg or "not found" in low or "notfound" in low:
+                        retried = False
+                        if e.gmail_id:
+                            e.gmail_id = ""
+                            try:
+                                ok2, ref2 = apply_via_api(creds, "", add, remove,
+                                                          message_id=e.message_id)
+                                if ok2:
+                                    e.label_state = e.label_target
+                                    if isinstance(ok2, str):
+                                        e.gmail_id = ok2
+                                    done += 1
+                                    retried = True
+                            except Exception:
+                                pass
+                        if not retried:
+                            # Give up on this one, quietly.
+                            e.label_state = e.label_target
+                            skipped_missing += 1
+                        continue
+
+                    failed += 1
+                    if "insufficient" in low or "scope" in low:
                         _sender_errors[sender_email] = (
                             "Needs re-authorisation — this Google account was "
                             "connected before labelling was added, so it never "
@@ -277,7 +352,11 @@ def label_pending(db, limit: int = 300) -> dict:
 
     if done:
         print(f"[Labels] Labelled {done} message(s).")
-    return {"labelled": done, "failed": failed, "pending": len(pending)}
+    if skipped_missing:
+        print(f"[Labels] {skipped_missing} message(s) are no longer in the mailbox "
+              f"— skipped so they aren't retried forever.")
+    return {"labelled": done, "failed": failed,
+            "no_longer_in_mailbox": skipped_missing, "pending": len(pending)}
 
 
 # ---------------- Background worker ----------------
