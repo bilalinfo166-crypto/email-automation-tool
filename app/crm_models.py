@@ -1,7 +1,7 @@
 """CRM tables: domains, extracted business contacts, suppression list,
 campaigns (with structural compliance fields), send queue, and event log."""
 from datetime import datetime
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy import String, Integer, Boolean, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -151,6 +151,12 @@ class ScraperResult(Base):
 class OutreachEntry(Base):
     """Campaign sheet — unique emails to send, with live status tracking."""
     __tablename__ = "outreach_entries"
+    # One email can exist once PER mode (vendor/client/blog kept separate).
+    # This is enforced by the database, so no code path — scraper import, CSV
+    # import, campaign builder — can ever create a duplicate again.
+    __table_args__ = (
+        UniqueConstraint("mode", "email", name="uq_outreach_mode_email"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     mode: Mapped[str] = mapped_column(String, default="vendor", index=True)
     email: Mapped[str] = mapped_column(String, index=True)
@@ -176,6 +182,11 @@ class OutreachEntry(Base):
     ref_article: Mapped[str] = mapped_column(String, default="")
     ref_title: Mapped[str] = mapped_column(String, default="")
     message_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # Threading: the first message of the conversation, and everything since.
+    # Follow-ups quote these so they land under the original email.
+    thread_root_id: Mapped[str] = mapped_column(String, default="")
+    thread_refs: Mapped[str] = mapped_column(Text, default="")
+    gmail_thread_id: Mapped[str] = mapped_column(String, default="")
     gmail_id: Mapped[str] = mapped_column(String, default="")   # Gmail's own id (OAuth sends)
     deal_stage: Mapped[str] = mapped_column(String, default="")   # "" | "dealing" | "done"
     label_state: Mapped[str] = mapped_column(String, default="")  # what is applied now

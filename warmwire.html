@@ -39,6 +39,8 @@
   .nav .badge{margin-left:auto;font-family:var(--mono);font-size:11px;background:#22304180;padding:1px 7px;border-radius:20px;color:#9DB0C4}
   .side-foot{border-top:1px solid #1B2530;padding-top:10px;margin-top:2px}
   .dcell:hover{background:var(--panel-2)}
+  .fufil{font-size:11px;padding:3px 10px;border-radius:20px;border:1px solid var(--line);cursor:pointer;color:var(--muted);user-select:none}
+  .fufil.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:600}
   .sitesmore{font-size:10px;color:var(--brand);margin-left:4px;cursor:pointer;background:var(--brand-wash);padding:1px 6px;border-radius:9px;font-weight:600;flex:0 0 auto;user-select:none}
   .sitesmore:hover{filter:brightness(.94)}
   .dcell:focus{background:#fff;box-shadow:0 0 0 2px var(--brand-wash)}
@@ -1234,6 +1236,51 @@
           <div class="ch-head"><h3>Campaign Progress</h3><span class="pill b" id="graphLive">live</span></div>
           <div id="liveGraph" style="display:flex;align-items:end;gap:8px;height:160px;padding:10px 0"></div>
         </div>
+
+        <!-- FOLLOW-UPS -->
+        <div class="card ch" style="margin-top:14px">
+          <div class="ch-head">
+            <h3>Follow-ups</h3>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span class="pill g" id="fuAuto" style="font-size:10px">auto</span>
+              <button class="btn sm" onclick="runFollowupsNow()">Send a batch now</button>
+            </div>
+          </div>
+          <div id="fuCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px"></div>
+          <div id="fuGraph" style="display:flex;align-items:end;gap:8px;height:150px;padding:16px 0 4px"></div>
+          <div id="fuNote" class="hint" style="margin-top:6px;font-size:11.5px"></div>
+
+          <!-- opens when you click a bar or the link below -->
+          <div id="fuDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <span class="fufil on" data-f="" onclick="pickFuFilter(this)">All</span>
+                <span class="fufil" data-f="1" onclick="pickFuFilter(this)">1st only</span>
+                <span class="fufil" data-f="2" onclick="pickFuFilter(this)">2nd only</span>
+                <span class="fufil" data-f="replied" onclick="pickFuFilter(this)">Replied</span>
+                <span class="fufil" data-f="waiting" onclick="pickFuFilter(this)">Still waiting</span>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center">
+                <span class="hint" id="fuLogInfo" style="font-size:11px"></span>
+                <span onclick="openFuDetail(fuFilter)" title="Close"
+                      style="cursor:pointer;color:var(--muted);font-size:15px;line-height:1">×</span>
+              </div>
+            </div>
+            <div id="fuBySender" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+            <div style="overflow-x:auto"><div style="min-width:760px">
+              <div class="srow head" style="grid-template-columns:1.3fr 1.2fr .5fr .8fr .8fr .7fr">
+                <span>Contact</span><span>Sent from</span><span>#</span>
+                <span>First email</span><span>Last reminder</span><span>Result</span>
+              </div>
+              <div id="fuLogRows"></div>
+            </div></div>
+            <div style="margin-top:10px;display:flex;gap:8px">
+              <button class="btn sm" onclick="fuPage(-1)">← Prev</button>
+              <button class="btn sm" onclick="fuPage(1)">Next →</button>
+            </div>
+          </div>
+        </div>
+
         <!-- EMAIL TABLE WITH FILTERS + PAGINATION -->
         <div class="card ch">
           <div class="ch-head">
@@ -1458,6 +1505,7 @@
                 <button class="btn sm" id="scrRestartBtn" onclick="scrControl('restart')" style="display:none">Restart</button>
                 <button class="btn sm" onclick="retryFailed()" style="background:#f79009;color:#fff">Retry failed</button>
                 <button class="btn sm" onclick="loadPrevJobs()">Previous jobs</button>
+                <button class="btn sm" id="scrSplitBtn" onclick="splitIntoBatches()" style="display:none;background:#6941c6;color:#fff">Split into batches</button>
                 <span class="scr-status" id="scrStatus"></span>
               </div>
             </div>
@@ -2294,13 +2342,32 @@ document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>{
   if(v==='blogresearch') loadBlogJobs();
   if(v==='deals' && mode==='vendor') loadDeals();
   if(v==='prospecting') loadLatestScraperJob();
-  if(v==='overview') { loadRealSenders(); loadRealDashboard(); }
+  if(v==='overview') { loadRealSenders(); loadRealDashboard(); loadFollowups(); }
 }));
 
 // When the Email Scraper tab opens (or after a page refresh), reload the most
 // recent job so its progress bar, LIVE DOMAIN STATUS and emails come back
 // instead of a blank panel.
 function loadLatestScraperJob(){
+  // First ask the server which job is LIVE right now — a batch started
+  // elsewhere should show here automatically, not the newest-by-id which
+  // might be a queued batch that hasn't started.
+  apiCall('/crm/scraper/running?mode='+apiMode()).then(function(live){
+    if(live && live.id){
+      var pc=document.getElementById('scrProgressCard');
+      var dc=document.getElementById('scrDomCard');
+      scrJobId=live.id;
+      if(pc) pc.style.display='block';
+      if(dc) dc.style.display='block';
+      pollScraper();
+      if(scrTimer)clearInterval(scrTimer);
+      scrTimer=setInterval(pollScraper,1500);
+      return;
+    }
+    _loadLatestScraperJobFallback();
+  }).catch(function(){ _loadLatestScraperJobFallback(); });
+}
+function _loadLatestScraperJobFallback(){
   apiCall('/crm/scraper/jobs?mode='+apiMode()).then(function(jobs){
     var pc=document.getElementById('scrProgressCard');
     var dc=document.getElementById('scrDomCard');
@@ -2557,6 +2624,160 @@ function applyMode(m){
   reloadForMode();
 }
 
+// ===== FOLLOW-UPS (Overview card) =====
+// Anyone who hasn't replied after the wait gets a short nudge, sent a few per
+// sender per hour so no single mailbox bursts.
+function loadFollowups(){
+  apiCall('/crm/followups/stats?mode='+dataMode()).then(function(f){
+    var box=document.getElementById('fuCards');
+    if(!box) return;
+    var cards=[
+      {label:'Due now',   val:f.due_now,                color:'var(--amber)'},
+      {label:'Reminded',  val:f.reminders_sent,         color:'var(--ink)'},
+      {label:'1st',       val:f.first_reminder,         color:'var(--muted)'},
+      {label:'2nd',       val:f.second_reminder,        color:'var(--muted)'},
+      {label:'Replied after', val:f.replied_after_reminder, color:'var(--green)'},
+      {label:'Awaiting reply', val:f.waiting_for_reply, color:'var(--muted)'},
+    ];
+    box.innerHTML=cards.map(function(c){
+      return '<div style="background:var(--panel-2);border-radius:10px;padding:11px 13px">'+
+        '<div style="font-size:11px;color:var(--muted);margin-bottom:3px">'+c.label+'</div>'+
+        '<div style="font-size:21px;font-weight:700;color:'+c.color+'">'+
+        (c.val||0).toLocaleString()+'</div></div>';
+    }).join('');
+
+    // A bar chart of the same numbers — easier to read at a glance than digits.
+    // Clicking a bar opens the detail list underneath.
+    var g=document.getElementById('fuGraph');
+    if(g){
+      var bars=[
+        {label:'Due now',       val:f.due_now||0,                color:'#f79009', f:''},
+        {label:'1st reminder',  val:f.first_reminder||0,         color:'#4a86e8', f:'1'},
+        {label:'2nd reminder',  val:f.second_reminder||0,        color:'#a479e2', f:'2'},
+        {label:'Replied after', val:f.replied_after_reminder||0, color:'#17b26a', f:'replied'},
+        {label:'Awaiting',      val:f.waiting_for_reply||0,      color:'#98a2b3', f:'waiting'},
+      ];
+      var maxV=Math.max(1, f.due_now||0, f.first_reminder||0, f.second_reminder||0,
+                        f.replied_after_reminder||0, f.waiting_for_reply||0);
+      g.innerHTML=bars.map(function(b){
+        var h=Math.max(4, Math.round(b.val/maxV*100));
+        return '<div onclick="openFuDetail(\''+b.f+'\')" title="Click for the full list" '+
+          'style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:end;cursor:pointer">'+
+          '<span style="font-size:13px;font-weight:700;color:'+b.color+'">'+b.val.toLocaleString()+'</span>'+
+          '<div style="width:100%;background:'+b.color+';border-radius:8px 8px 0 0;height:'+h+'%;min-height:4px;transition:height .6s"></div>'+
+          '<span style="font-size:11px;color:var(--muted);text-align:center">'+b.label+'</span></div>';
+      }).join('');
+    }
+
+    var pill=document.getElementById('fuAuto');
+    if(pill){
+      pill.textContent = f.auto_running ? 'auto · on' : 'auto · off';
+      pill.className = 'pill '+(f.auto_running?'g':'b');
+    }
+    var note=document.getElementById('fuNote');
+    if(note){
+      var open = (document.getElementById('fuDetail')||{}).style &&
+                 document.getElementById('fuDetail').style.display === 'block';
+      note.innerHTML = '<span onclick="openFuDetail(\'\')" style="color:var(--brand);cursor:pointer">' +
+        (open ? 'Hide the list ↑' : 'See every reminder →') + '</span>  ·  ' +
+        'A reminder goes out '+f.delay_hours+'h after the last message '+
+        'if there\'s still no reply — up to '+f.max_per_contact+' per contact, '+
+        'shared across '+f.senders+' sender'+(f.senders===1?'':'s')+'.';
+    }
+  }).catch(function(){});
+}
+
+var fuFilter='', fuPageNo=1;
+
+// The detail list behind the chart: every reminder, who it went to, which
+// sender sent it, and whether it brought a reply. Stays out of the way until
+// asked for — click to open, click the same thing again to close.
+function openFuDetail(filter){
+  filter = filter || '';
+  var box=document.getElementById('fuDetail');
+  if(!box) return;
+  var isOpen = box.style.display === 'block';
+
+  // Clicking the same bar (or the link) again closes the panel.
+  if(isOpen && filter === fuFilter){
+    box.style.display='none';
+    return;
+  }
+
+  fuFilter = filter;
+  fuPageNo = 1;
+  box.style.display='block';
+  document.querySelectorAll('.fufil').forEach(function(el){
+    el.classList.toggle('on', (el.getAttribute('data-f')||'')===fuFilter);
+  });
+  loadFuLog();
+}
+
+function pickFuFilter(el){
+  fuFilter = el.getAttribute('data-f')||'';
+  fuPageNo = 1;
+  document.querySelectorAll('.fufil').forEach(function(x){ x.classList.remove('on'); });
+  el.classList.add('on');
+  loadFuLog();
+}
+
+function fuPage(dir){
+  fuPageNo = Math.max(1, fuPageNo + dir);
+  loadFuLog();
+}
+
+function loadFuLog(){
+  apiCall('/crm/followups/log?mode='+dataMode()+'&page='+fuPageNo+
+          '&limit=50'+(fuFilter?'&filter='+fuFilter:'')).then(function(d){
+    var el=document.getElementById('fuLogRows');
+    if(!el) return;
+    var rows=d.rows||[];
+
+    var info=document.getElementById('fuLogInfo');
+    if(info){
+      var from=(d.page-1)*d.limit+1;
+      info.textContent = rows.length
+        ? from+'–'+(from+rows.length-1)+' of '+d.total
+        : 'nothing here yet';
+    }
+
+    // which sender has carried how much of the load
+    var bs=document.getElementById('fuBySender');
+    if(bs){
+      bs.innerHTML=(d.by_sender||[]).map(function(x){
+        return '<span style="font-size:11px;background:var(--panel-2);padding:3px 9px;border-radius:20px">'+
+          x.sender.split('@')[0]+' <b>'+x.reminders+'</b></span>';
+      }).join('');
+    }
+
+    if(!rows.length){
+      el.innerHTML='<div style="padding:14px;color:var(--faint)">No reminders match this filter yet.</div>';
+      return;
+    }
+    el.innerHTML=rows.map(function(r){
+      var result = r.replied
+        ? '<span class="pill g" style="font-size:10px">replied</span>'
+        : '<span style="font-size:11px;color:var(--muted)">waiting</span>';
+      return '<div class="srow" style="grid-template-columns:1.3fr 1.2fr .5fr .8fr .8fr .7fr;cursor:default">'+
+        '<div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+r.email+'">'+r.email+'</div>'+
+        '<div style="font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.sender||'—')+'</div>'+
+        '<div style="font-size:12px;font-weight:600">'+r.followup_count+'</div>'+
+        '<div style="font-size:11px;color:var(--muted)">'+(r.first_sent||'—')+'</div>'+
+        '<div style="font-size:11px">'+(r.last_reminder||'—')+'</div>'+
+        '<div>'+result+'</div></div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function runFollowupsNow(){
+  var note=document.getElementById('fuNote');
+  if(note) note.innerHTML='<span class="spin"></span> Sending a batch...';
+  apiCall('/crm/followups/run?mode='+dataMode()+'&limit=60','POST').then(function(r){
+    showToast('Sent '+(r.sent||0)+' reminder(s)','success');
+    loadFollowups();
+  }).catch(function(e){ showToast(e.message,'error'); loadFollowups(); });
+}
+
 // ===== DEALS SHEET =====
 // One row per vendor, filled in automatically from their replies. Any cell can
 // be corrected by hand — click it, type, press Enter.
@@ -2664,7 +2885,7 @@ function exportDeals(fmt){
 var SNAP_IDS=['outreachStats','ovKpis','liveGraph','outreachRows','outreachTotal',
   'pageInfo','senderRows','navSenders','campRows','templateList','templatesTitle',
   'templatesHint','anHeroStats','anRates','anFunnel','anEngagement','anSenders',
-  'anCampaigns','senderLogRows','senderLogInfo','scrRows','scrDomRows','scrCount','dealRows',
+  'anCampaigns','senderLogRows','senderLogInfo','scrRows','scrDomRows','scrCount','dealRows','fuCards','fuNote',
   'blogLinkRows'];
 
 function saveSnapshot(m){
@@ -2737,7 +2958,7 @@ setInterval(function(){
     _liveTick++;
     if(_liveTick % 3 === 0) refreshBadges();    // every ~15s
     var v=_currentView();
-    if(v==='overview'){ loadRealDashboard(); }
+    if(v==='overview'){ loadRealDashboard(); loadFollowups(); }
     else if(v==='campaigns'){ renderCampaigns(); loadRealDashboard(); }
     else if(v==='senders'){ loadRealSenders(); loadSenderLog(); }
     else if(v==='warmup'){ loadRealSenders(); loadRealWarmup(); }
@@ -2770,6 +2991,7 @@ function reloadForMode(){
 
     // Refetch every panel for the new mode (each is independent + guarded)
     try{ loadRealDashboard(); }catch(e){}   // also loads the send list
+    try{ loadFollowups(); }catch(e){}
     try{ loadRealSenders(); }catch(e){}
     try{ loadSenderLog(); }catch(e){}
     try{ renderCampaigns(); }catch(e){}
@@ -2808,7 +3030,28 @@ async function apiCall(path,method,body){
   return data;
 }
 let scrContacts=[], scrJobId=null, scrTimer=null;
+// How much of a running job to pull on each poll. The job itself can be any
+// size; this is only what the panel shows live.
+const SCR_DOM_LIMIT=300, SCR_EMAIL_LIMIT=300;
+function resetScraperPanel(){
+  window._scrDomSig=null;
+  // Wipe whatever the last run left behind, so a new campaign doesn't show
+  // stale domains or counts while it spins up.
+  if(scrTimer){ clearInterval(scrTimer); scrTimer=null; }
+  scrJobId=null; scrContacts=[];
+  window._scrFinished=null;
+  ['scrRows','scrDomRows'].forEach(function(id){
+    var el=document.getElementById(id); if(el) el.innerHTML='';
+  });
+  var c=document.getElementById('scrCount'); if(c) c.textContent='0 contacts';
+  var st=document.getElementById('scrStatus'); if(st) st.textContent='';
+  ['scrProgressCard','scrDomCard'].forEach(function(id){
+    var el=document.getElementById(id); if(el) el.style.display='none';
+  });
+}
+
 function runScraper(){
+  resetScraperPanel();
   const raw=document.getElementById('scrInput').value.split('\n').map(x=>x.trim().toLowerCase()).filter(Boolean);
   const sheet=(document.getElementById('scrSheet')||{}).value||'';
   const domains=[...new Set(raw)];
@@ -2820,13 +3063,21 @@ function runScraper(){
   apiCall('/crm/scraper/jobs','POST',{mode:apiMode(),domains:domains,sheet_csv_url:sheet.trim(),max_per_domain:limit})
     .then(r=>{
       scrJobId=r.job_id;
-      document.getElementById('scrDomains').textContent=r.total;
+      // The server hands back a job id straight away; the domain list is still
+      // being built in the background, so the count arrives via polling.
+      document.getElementById('scrDomains').textContent=r.total||'…';
+      // Clear whatever the previous job left behind so the new run's numbers
+      // aren't mixed with the old ones.
+      scrContacts=[];
+      var _r=document.getElementById('scrRows'); if(_r) _r.innerHTML='';
+      var _d=document.getElementById('scrDomRows'); if(_d) _d.innerHTML='';
+      var _c=document.getElementById('scrCount'); if(_c) _c.textContent='0 contacts';
       document.getElementById('scrProgressCard').style.display='block';
       document.getElementById('scrDomCard').style.display='block';
       document.getElementById('scrStopBtn').style.display='';
       document.getElementById('scrResumeBtn').style.display='';
       document.getElementById('scrRestartBtn').style.display='';
-      status.innerHTML='<span class="spin"></span> Scraping '+r.total+' domain(s)…';
+      status.innerHTML='<span class="spin"></span> Building the domain list…';
       scrTimer=setInterval(pollScraper,1500);
       pollScraper();
     }).catch(e=>{status.textContent='Error: '+e.message;});
@@ -2850,11 +3101,34 @@ function setScrButtons(status){
 
 function pollScraper(){
   if(!scrJobId)return;
-  apiCall('/crm/scraper/jobs/'+scrJobId+'?mode='+apiMode()).then(d=>{
+  // Fast heartbeat: this tiny async endpoint answers instantly even while a big
+  // scrape is writing to the DB, so the header counters never freeze. The
+  // heavier detail fetch below fills in the domain/email lists when it can.
+  apiCall('/crm/scraper/jobs/'+scrJobId+'/progress').then(p=>{
+    if(!p||p.id==null)return;
+    var f=document.getElementById('scrFound'); if(f)f.textContent=p.emails_found;
+    var pr=document.getElementById('scrProgress'); if(pr)pr.style.width=(p.progress||0)+'%';
+    var st=document.getElementById('scrStatus');
+    if(st&&p.status==='running')st.innerHTML='<span class="spin"></span> '+p.done+' / '+p.total+' domains \u00b7 '+p.emails_found+' emails';
+    var dd=document.getElementById('scrDomains'); if(dd&&p.total)dd.textContent=p.total;
+  }).catch(_=>{});
+  // Only ask for what we can actually show. Pulling every domain and every
+  // email on a 4,000-site job meant a ~2 MB response every 1.5s, and the tab
+  // spent longer redrawing it than the gap between polls — so the dashboard
+  // froze and anything you clicked looked stuck.
+  // Use the light live endpoint (read-only connection) so the domain and email
+  // lists keep filling even while a big scrape is writing. The heavy /jobs/{id}
+  // could time out behind the scrape's writes and return empty, which showed
+  // "Showing 0 of 5000" even though emails were being found.
+  apiCall('/crm/scraper/jobs/'+scrJobId+'/live?dom_limit='+SCR_DOM_LIMIT+'&email_limit='+SCR_EMAIL_LIMIT).then(d=>{
     scrContacts=d.emails||[];
     document.getElementById('scrFound').textContent=d.emails_found;
     document.getElementById('scrVerified').textContent=d.emails_found;
     document.getElementById('scrCount').textContent=d.emails_found+' contacts';
+    if(d.total){ var dEl=document.getElementById('scrDomains'); if(dEl) dEl.textContent=d.total; }
+    // Offer batch-splitting for oversized jobs (they run more reliably in chunks)
+    var splitBtn=document.getElementById('scrSplitBtn');
+    if(splitBtn) splitBtn.style.display=(d.total>6000 && (d.status==='running'||d.status==='stopped'||d.status==='queued'))?'':'none';
     document.getElementById('scrBar').style.width=d.progress+'%';
     document.getElementById('scrCounts').textContent=d.done+' / '+d.total+' domains · '+d.emails_found+' emails found';
     document.getElementById('scrJobStatus').textContent=d.status;
@@ -2863,9 +3137,51 @@ function pollScraper(){
     // so they're always correct — including after a page refresh, when the job
     // is auto-loaded rather than started by hand.
     setScrButtons(d.status);
+
+    // When a run finishes, stop polling and clear the live tracking so the next
+    // campaign starts from a clean panel instead of inheriting this one's state.
+    if(d.status==='completed' || d.status==='error'){
+      if(scrTimer){ clearInterval(scrTimer); scrTimer=null; }
+      if(!window._scrFinished || window._scrFinished!==d.id){
+        window._scrFinished = d.id;
+        try{ refreshBadges(); }catch(e){}
+      }
+    } else {
+      window._scrFinished = null;
+    }
+
     // live domain status
-    var labels={pending:'⏳ Pending',scraping:'🔄 Scraping…',completed:'✅ Completed',failed:'❌ Failed',no_email:'⚠ No email found'};
     var labels={pending:'⏳ Pending',scraping:'🔄 Scraping…',completed:'✅ Completed',failed:'❌ Failed',no_email:'⚠ No email'};
+    // Tell the user this is a live window, not the whole list — the totals
+    // above and the export still cover every domain.
+    var domTotal=(d.domains_total!=null?d.domains_total:d.total)||0;
+    var shown=(d.domains||[]).length;
+    var noteEl=document.getElementById('scrDomNote');
+    if(!noteEl){
+      var host=document.getElementById('scrDomRows');
+      if(host&&host.parentNode){
+        noteEl=document.createElement('div');
+        noteEl.id='scrDomNote';
+        noteEl.style.cssText='padding:6px 14px;font-size:11.5px;color:var(--faint)';
+        host.parentNode.insertBefore(noteEl,host);
+      }
+    }
+    if(noteEl){
+      var sc=d.status_counts||{};
+      var parts=[];
+      ['scraping','completed','no_email','failed','pending'].forEach(function(k){
+        if(sc[k]) parts.push((labels[k]||k)+': '+sc[k]);
+      });
+      noteEl.innerHTML=(domTotal>shown
+          ? 'Showing the '+shown+' most recent of '+domTotal+' domains'
+          : 'Showing all '+shown+' domains')
+        +(parts.length?' &nbsp;·&nbsp; '+parts.join(' &nbsp;·&nbsp; '):'');
+    }
+    // Rebuilding 4,000 rows of innerHTML on every poll is what actually locked
+    // the tab. Skip the redraw entirely when nothing changed.
+    var sig=(d.domains||[]).map(function(x){return x.domain+'|'+x.status;}).join(',');
+    if(sig!==window._scrDomSig){
+      window._scrDomSig=sig;
     document.getElementById('scrDomRows').innerHTML=(d.domains||[]).map(x=>{
       var vs=''; try{var s=JSON.parse(x.vendor_signals||'{}');
         if(s.category) vs='<span style="color:#0ea5a3;font-weight:700">'+s.category+'</span>'+(s.confidence?' <small style="color:var(--muted)">'+s.confidence+'%</small>':'');
@@ -2882,15 +3198,51 @@ function pollScraper(){
       '<div style="font-size:12px">'+(labels[x.status]||x.status)+(x.error?' — '+x.error:'')+'</div>'+
       '<div style="font-size:11px">'+(vs||'—')+'</div></div>';
     }).join('');
+    }
     // live emails
-    renderScrRows();
+    renderScrRows(d.emails_total);
     var status=document.getElementById('scrStatus');
-    if(d.status==='completed'){clearInterval(scrTimer);status.textContent='Done — '+d.emails_found+' email(s) from '+d.total+' domain(s).';}
+    if(d.status==='completed'){
+      clearInterval(scrTimer); scrTimer=null;
+      status.textContent='Done — '+d.emails_found+' email(s) from '+d.total+' domain(s).';
+      // Reset the panel so the next batch starts clean instead of inheriting
+      // the finished job's state.
+      setScrButtons('completed');
+      scrJobId=null;
+      var box=document.getElementById('scrDomains');
+      if(box && !box.value) box.placeholder='Paste the next batch of domains here…';
+      refreshBadges();
+    }
+    else if(d.status==='preparing'){
+      document.getElementById('scrDomains').textContent='…';
+      status.innerHTML='<span class="spin"></span> Building the domain list…';
+    }
+    else if(d.status==='error'){
+      clearInterval(scrTimer); scrTimer=null;
+      status.innerHTML='<span style="color:var(--red)">✕</span> '+(d.error||'The job stopped with an error — check the server window.');
+    }
     else if(d.status==='stopped'){clearInterval(scrTimer);status.textContent='Stopped at '+d.done+'/'+d.total+'.';}
     else{status.innerHTML='<span class="spin"></span> '+d.done+'/'+d.total+' domains processed…';}
   }).catch(e=>{clearInterval(scrTimer);document.getElementById('scrStatus').textContent='Error: '+e.message;});
 }
-function renderScrRows(){
+function renderScrRows(total){
+  // scrContacts is now the newest slice, not the whole job. Say so, so nobody
+  // thinks emails went missing — Export and "Add to send list" use all of them.
+  var note=document.getElementById('scrRowsNote');
+  if(!note){
+    var host=document.getElementById('scrRows');
+    if(host&&host.parentNode){
+      note=document.createElement('div');
+      note.id='scrRowsNote';
+      note.style.cssText='padding:6px 14px;font-size:11.5px;color:var(--faint)';
+      host.parentNode.insertBefore(note,host);
+    }
+  }
+  if(note){
+    note.textContent=(total!=null&&total>scrContacts.length)
+      ? 'Showing the '+scrContacts.length+' newest of '+total+' emails — Export gives you all of them.'
+      : '';
+  }
   document.getElementById('scrRows').innerHTML=scrContacts.map((c,i)=>
     '<div class="srow" style="grid-template-columns:1.5fr .9fr .6fr .5fr .6fr;cursor:default">'+
     '<div class="who2"><div class="av" style="background:'+palette[i%palette.length]+'">'+c.email[0].toUpperCase()+'</div><div class="em">'+c.email+'</div></div>'+
@@ -2928,6 +3280,22 @@ function scrControl(action){
 function scrExport(fmt){
   if(!scrJobId)return;
   window.open(API_BASE+'/crm/scraper/jobs/'+scrJobId+'/export?format='+fmt+'&mode='+apiMode(),'_blank');
+}
+function splitIntoBatches(){
+  if(!scrJobId){document.getElementById('scrStatus').textContent='No active job to split.';return;}
+  if(!confirm('Split this job\u2019s remaining domains into batches of 5000?\n\nThe batches will run one after another automatically and keep the app responsive.')) return;
+  document.getElementById('scrStatus').innerHTML='<span class="spin"></span> Splitting into batches\u2026';
+  apiCall('/crm/scraper/jobs/'+scrJobId+'/split','POST',{mode:apiMode(),batch_size:5000}).then(r=>{
+    if(r.batches===0){document.getElementById('scrStatus').textContent=r.message;return;}
+    document.getElementById('scrStatus').textContent=r.message;
+    // switch to watching the first batch
+    if(r.jobs&&r.jobs.length){
+      scrJobId=r.jobs[0].job_id;
+      if(scrTimer)clearInterval(scrTimer);
+      scrTimer=setInterval(pollScraper,1500); pollScraper();
+    }
+    loadPrevJobs();
+  }).catch(e=>{document.getElementById('scrStatus').textContent='Error: '+e.message;});
 }
 function retryFailed(){
   if(!scrJobId){document.getElementById('scrStatus').textContent='No active job to retry.';return;}

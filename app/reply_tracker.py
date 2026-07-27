@@ -109,6 +109,25 @@ def _referenced_ids(hdr) -> set:
     return ids
 
 
+def _failed_recipients(subject: str, body: str) -> set:
+    """Addresses a bounce notice reports as undeliverable.
+
+    Delivery failures always name the address that couldn't be reached, so this
+    catches them even when the notice doesn't quote our original Message-ID.
+    Our own senders are filtered out — a bounce is addressed TO us.
+    """
+    found = set()
+    text = f"{subject or ''} {body or ''}"
+    for m in re.finditer(r"[\w.\-+]+@[\w.\-]+\.\w+", text):
+        a = m.group(0).strip().lower().strip(".,;:>)")
+        if not a or a.startswith(("mailer-daemon", "postmaster", "noreply", "no-reply")):
+            continue
+        if a.endswith(("googlemail.com", "google.com")) and "daemon" in a:
+            continue
+        found.add(a)
+    return found
+
+
 def _is_bounce(from_addr: str, subject: str) -> bool:
     f = (from_addr or "").lower()
     sub = (subject or "").lower()
@@ -145,7 +164,8 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
     check take hours (or appear to hang).
     """
     replied_to, bounced, reply_from = set(), set(), set()
-    threads = {}         # message-id / sender -> every message of that conversation
+    bounced_addrs = set()   # addresses a bounce notice says are undeliverable
+    threads = {}            # message-id / sender -> every message of that conversation
     mail = None
     try:
         # Hard timeout so one unresponsive mailbox can't stall everything
@@ -178,6 +198,11 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
                                 continue          # newsletter / cold mail, not a reply
                             if _is_bounce(frm, subj):
                                 bounced |= refs
+                                # A bounce always names the address that failed.
+                                # Reading it means we catch bounces even when
+                                # the notice doesn't quote our Message-ID.
+                                for a in _failed_recipients(subj, body_text):
+                                    bounced_addrs.add(a)
                                 continue
                             if _is_auto_reply(subj):
                                 continue
@@ -209,7 +234,7 @@ def _inbox_senders_imap(sender_email: str, app_password: str, days: int):
                 mail.logout()
             except Exception:
                 pass
-    return replied_to, bounced, reply_from, threads
+    return replied_to, bounced, reply_from, threads, bounced_addrs
 
 
 def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
@@ -218,6 +243,7 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
     Same rule as IMAP: only messages that reference one of OUR Message-IDs count.
     """
     replied_to, bounced, reply_from = set(), set(), set()
+    bounced_addrs = set()
     threads = {}
     refreshed = None
     try:
@@ -248,6 +274,8 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
                 return
             if _is_bounce(frm, subj):
                 bounced.update(refs)
+                for a in _failed_recipients(subj, body_text):
+                    bounced_addrs.add(a)
                 return
             if _is_auto_reply(subj):
                 return
@@ -275,7 +303,7 @@ def _inbox_senders_oauth(creds_dict: dict, days: int) -> tuple:
         }
     except Exception as e:
         print(f"[ReplyTracker] Gmail API failed: {type(e).__name__}: {e}")
-    return (replied_to, bounced, reply_from, threads), refreshed
+    return (replied_to, bounced, reply_from, threads, bounced_addrs), refreshed
 
 
 def check_replies(db, days: int = 14, progress: dict = None) -> dict:
@@ -321,20 +349,23 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
 
         # Read the mailbox
         replied_ids, bounced_ids, reply_from, threads = set(), set(), set(), {}
+        bounced_addrs = set()
         if s.method == "app_password" and s.app_password:
             try:
                 pw = security.decrypt(s.app_password)
             except Exception:
                 pw = ""
             if pw:
-                replied_ids, bounced_ids, reply_from, threads = _inbox_senders_imap(s.email, pw, days)
+                (replied_ids, bounced_ids, reply_from, threads,
+                 bounced_addrs) = _inbox_senders_imap(s.email, pw, days)
         elif s.method == "oauth" and s.oauth_token:
             try:
                 creds = json.loads(security.decrypt(s.oauth_token))
             except Exception:
                 creds = None
             if creds:
-                (replied_ids, bounced_ids, reply_from, threads), refreshed = _inbox_senders_oauth(creds, days)
+                ((replied_ids, bounced_ids, reply_from, threads,
+                  bounced_addrs), refreshed) = _inbox_senders_oauth(creds, days)
                 if refreshed:
                     try:
                         s.oauth_token = security.encrypt(json.dumps(refreshed))
@@ -375,6 +406,20 @@ def check_replies(db, days: int = 14, progress: dict = None) -> dict:
                 pass
             _record_deal(db, entry, threads.get(addr) or [])
             marked += 1
+
+        # Addresses a delivery failure named — mark them so they're never
+        # emailed or reminded again.
+        if bounced_addrs:
+            hit = db.query(OutreachEntry).filter(
+                OutreachEntry.sender_email == s.email,
+                OutreachEntry.email.in_(list(bounced_addrs)),
+                OutreachEntry.status.in_(["sent", "opened", "pending", "queued"]),
+            ).all()
+            for e in hit:
+                e.status = "bounced"
+            if hit:
+                print(f"[ReplyTracker] {s.email}: {len(hit)} address(es) reported "
+                      f"undeliverable — they won't be emailed again")
 
         # Bounce notifications reference our message too — record them properly
         # instead of counting them as interest.

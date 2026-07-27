@@ -232,6 +232,29 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 if not claimed:
                     continue  # already claimed/sent by someone else — skip it
 
+                # GLOBAL DUPLICATE GUARD — never email the same address twice,
+                # even from a different sender, campaign, or run. The atomic
+                # claim above stops two loops grabbing the same ROW, but the
+                # same PERSON can sit on more than one row (e.g. imported twice
+                # long ago, or the same address under two domains). Before we
+                # actually send, check whether this address has ALREADY been
+                # contacted anywhere. If so, don't send again — mark this row so
+                # it leaves the queue and move on.
+                addr = (entry.email or "").strip().lower()
+                already_contacted = db.query(OutreachEntry.id).filter(
+                    OutreachEntry.email == entry.email,
+                    OutreachEntry.id != entry.id,
+                    OutreachEntry.status.in_(["sent", "opened", "replied",
+                                              "bounced", "unsubscribed"]),
+                ).first()
+                if already_contacted:
+                    entry.status = "duplicate"      # already reached this person
+                    entry.sender_email = entry.sender_email or ""
+                    db.commit()
+                    print(f"[SendEngine] Skipped {entry.email} — already contacted "
+                          f"earlier (no duplicate send).")
+                    continue
+
                 # Pick a sender that still has daily capacity (round-robin among available)
                 sender = None
                 for attempt in range(len(senders)):
@@ -332,6 +355,9 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                                 body_html=rendered["body_html"],
                             )
                             entry.message_id = res.get("message_id", "")
+                            if not entry.thread_root_id:
+                                entry.thread_root_id = entry.message_id
+                                entry.thread_refs = entry.message_id
                             sent_ok = True
                     elif sender.method == "oauth":
                         import json
@@ -351,6 +377,11 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                                 sender.oauth_token = security.encrypt(json.dumps(result["creds"]))
                             entry.message_id = result.get("message_id", "")
                             entry.gmail_id = result.get("gmail_id", "")
+                            if not entry.thread_root_id:
+                                entry.thread_root_id = entry.message_id
+                                entry.thread_refs = entry.message_id
+                            if result.get("thread_id"):
+                                entry.gmail_thread_id = result["thread_id"]
                             sent_ok = True
 
                     if sent_ok:

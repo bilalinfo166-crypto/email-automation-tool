@@ -100,11 +100,20 @@ def _startup():
                 db.rollback()
                 print(f"[AutoResume] Could not queue job #{job.id}: {je}")
 
-        # Kick off the first queued job (the rest follow automatically as each ends)
-        try:
-            scraper_jobs._start_next_queued()
-        except Exception as se:
-            print(f"[AutoResume] Could not start queued job: {se}")
+        # Interrupted jobs are queued, NOT started. Auto-starting them meant
+        # every restart immediately launched a few-thousand-domain scrape with
+        # 35 workers before the dashboard had loaded once — so the app was busy
+        # from the first second and nothing else got a turn. Press Resume in the
+        # Email Scraper panel (or set AUTO_RESUME_SCRAPER=1) to pick it back up.
+        import os
+        if os.getenv("AUTO_RESUME_SCRAPER", "").strip() in ("1", "true", "yes"):
+            try:
+                scraper_jobs._start_next_queued()
+            except Exception as se:
+                print(f"[AutoResume] Could not start queued job: {se}")
+        else:
+            print("[AutoResume] Queued job(s) are waiting — press Resume in the "
+                  "Email Scraper panel to continue them.")
 
         # 2) Campaigns that were "sending" when the server stopped
         try:
@@ -180,6 +189,17 @@ def _startup():
         gmail_labels.start(interval_seconds=15)
     except Exception as e:
         print(f"[Labels] Could not start: {e}")
+
+    # ---- Follow-up reminders ----
+    # Anyone who hasn't replied after 30 hours gets a short nudge. Sent in
+    # batches each hour rather than all at once, so a backlog never goes out
+    # as one blast.
+    try:
+        from . import followup_engine
+        followup_engine.start(interval_minutes=60, delay_hours=30,
+                              max_followups=2, per_sender=8)
+    except Exception as e:
+        print(f"[FollowUp] Could not start: {e}")
 
 
 def _reset_daily(s: Sender):

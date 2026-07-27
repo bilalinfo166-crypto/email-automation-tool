@@ -33,7 +33,7 @@ _stop_flags: dict[int, bool] = {}
 # Total worker budget shared across ALL running jobs. Kept modest on purpose:
 # the same machine also serves the web UI, and saturating the CPU/network makes
 # the dashboard unresponsive.
-TOTAL_WORKER_BUDGET = 30
+TOTAL_WORKER_BUDGET = 60
 
 
 def _calc_workers(total_domains: int) -> int:
@@ -93,28 +93,136 @@ def valid_email(e: str) -> bool:
 
 # ---------------- job creation ----------------
 
-def create_job(db, mode: str, name: str, domains: list[str], source: str = "manual",
-               max_per_domain: int = 2) -> ScraperJob:
+# Why a job failed while it was still being prepared (no column on the model,
+# and it only matters until the page is refreshed).
+_prepare_errors: dict[int, str] = {}
+
+
+def create_job_shell(db, mode: str, name: str, source: str = "manual",
+                     max_per_domain: int = 2) -> ScraperJob:
+    """One tiny INSERT, nothing else — so the HTTP request can return at once."""
+    job = ScraperJob(mode=mode, name=name or f"Scrape {datetime.utcnow():%H:%M}",
+                     source=source, status="preparing", total=0,
+                     max_per_domain=max(1, min(int(max_per_domain or 2), 10)))
+    db.add(job); db.commit(); db.refresh(job)
+    return job
+
+
+def prepare_and_start(job_id: int, domains: list[str], sheet_csv_url: str = ""):
+    """Do the slow part off the request thread.
+
+    Downloading the sheet and inserting a few thousand rows used to happen
+    inside POST /crm/scraper/jobs, so the browser sat on 'Starting…' until all
+    of it finished. requests' timeout is per socket read, not a total budget —
+    a sheet that trickles in can hold the request open for minutes. Now the
+    request returns a job id immediately and the panel polls for the rest.
+    """
+    t = threading.Thread(target=_prepare, args=(job_id, list(domains), sheet_csv_url),
+                         daemon=True)
+    t.start()
+
+
+def _fail_prepare(db, job, msg: str):
+    print(f"[WarmWire] Job #{job.id} could not be prepared: {msg}")
+    _prepare_errors[job.id] = msg
+    job.status = "error"
+    db.commit()
+
+
+def _prepare(job_id: int, domains: list[str], sheet_csv_url: str = ""):
+    db = SessionLocal()
+    try:
+        job = db.get(ScraperJob, job_id)
+        if not job:
+            return
+        all_domains = list(domains)
+
+        if sheet_csv_url:
+            try:
+                import requests, csv, io
+                # (connect timeout, read timeout) — a stalled read now gives up
+                # instead of holding on indefinitely.
+                r = requests.get(sheet_csv_url, timeout=(10, 30))
+                r.raise_for_status()
+                txt = r.text
+                for row in csv.reader(io.StringIO(txt)):
+                    for cell in row:
+                        if cell and "." in cell and "@" not in cell:
+                            all_domains.append(cell)
+            except Exception as e:
+                _fail_prepare(db, job, f"Could not read the sheet CSV ({type(e).__name__}). "
+                                       f"Make sure it's published to the web as CSV.")
+                return
+
+        if not all_domains:
+            _fail_prepare(db, job, "No domains found.")
+            return
+
+        _fill_domains(db, job, all_domains)
+        _prepare_errors.pop(job_id, None)
+        job.status = "queued"
+        db.commit()
+        start(job_id)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        try:
+            job = db.get(ScraperJob, job_id)
+            if job:
+                _fail_prepare(db, job, f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _fill_domains(db, job: ScraperJob, domains: list[str]) -> int:
+    """Normalise, dedupe against history, and insert the job's domain rows."""
     seen, clean_domains = set(), []
     for raw in domains:
         d = normalize_domain(raw)
         if d and d not in seen:
             seen.add(d)
             clean_domains.append(d)
-    job = ScraperJob(mode=mode, name=name or f"Scrape {datetime.utcnow():%H:%M}",
-                     source=source, status="queued", total=len(clean_domains),
-                     max_per_domain=max(1, min(int(max_per_domain or 2), 10)))
-    db.add(job); db.commit(); db.refresh(job)
-    # Duplicate detection: check if domain was already scraped in a previous job (same mode)
-    for d in clean_domains:
-        prev = (db.query(ScraperJobDomain)
+
+    # Which domains have we already scraped in this mode? Fetch them ONCE.
+    # This used to run a JOIN query per domain — with a few thousand domains
+    # that's a few thousand queries inside the HTTP request, which is why
+    # creating a big job appeared to hang on "Starting...".
+    already = set()
+    try:
+        rows = (db.query(ScraperJobDomain.domain)
                 .join(ScraperJob, ScraperJob.id == ScraperJobDomain.job_id)
-                .filter(ScraperJob.mode == mode,
-                        ScraperJobDomain.domain == d,
+                .filter(ScraperJob.mode == job.mode,
                         ScraperJobDomain.status.in_(["completed", "no_email"]))
-                .first())
-        is_dup = prev is not None
-        db.add(ScraperJobDomain(job_id=job.id, domain=d, is_duplicate=is_dup))
+                .distinct().all())
+        already = {r[0] for r in rows if r[0]}
+    except Exception:
+        already = set()
+
+    # Insert in chunks so one huge transaction doesn't hold the write lock
+    CHUNK = 500
+    batch = []
+    for d in clean_domains:
+        batch.append(ScraperJobDomain(job_id=job.id, domain=d,
+                                      is_duplicate=(d in already)))
+        if len(batch) >= CHUNK:
+            db.add_all(batch); db.commit(); batch = []
+    if batch:
+        db.add_all(batch)
+    job.total = len(clean_domains)
+    db.commit()
+    print(f"[WarmWire] Job #{job.id} created with {len(clean_domains)} domain(s) "
+          f"({len(already & set(clean_domains))} seen before)")
+    return len(clean_domains)
+
+
+def create_job(db, mode: str, name: str, domains: list[str], source: str = "manual",
+               max_per_domain: int = 2) -> ScraperJob:
+    """Synchronous creation — kept for scripts/tests. The API uses the
+    shell + background prepare pair above so the browser never waits."""
+    job = create_job_shell(db, mode, name, source, max_per_domain)
+    _fill_domains(db, job, domains)
+    job.status = "queued"
     db.commit()
     return job
 
@@ -127,6 +235,7 @@ def _scrape_one(domain: str, mode: str = "vendor") -> dict:
     try:
         return scraper.extract_domain(domain, mode=mode)
     except Exception as e:
+        import traceback; traceback.print_exc()
         return {"contacts": [], "status": f"error: {type(e).__name__}", "vendor_signals": {}}
 
 
@@ -148,7 +257,10 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
         jd.vendor_signals = json.dumps(existing)
     if not contacts:
         jd.status = "failed" if ("reach" in status_text or "skip" in status_text or "error" in status_text) else "no_email"
-        jd.error = status_text if jd.status == "failed" else ""
+        # Prefer the specific error (e.g. "DNS: domain does not resolve") over the
+        # generic status, so retry rounds can skip DNS-dead hosts.
+        specific = result.get("error", "")
+        jd.error = (specific or status_text) if jd.status == "failed" else ""
         db.commit()
         return
     # keep only valid, deduped, best-first, up to the per-site limit
@@ -169,12 +281,23 @@ def _save_result(db, job: ScraperJob, jd: ScraperJobDomain, result: dict, limit:
     db.commit()
 
 
+# One domain's absolute ceiling. Enforced INSIDE extract_domain via the shared
+# session's per-request timeouts plus its own DOMAIN_BUDGET check between pages.
+# (An earlier version ran each domain in a throwaway thread and abandoned it on
+# timeout — but the abandoned thread kept holding a connection from the shared
+# HTTP session's pool, which leaked connections until healthy sites started
+# failing to connect and got mis-marked "no_email". The timeout belongs on the
+# socket, not on a wrapper thread.)
+
+
 def _scrape_with_retry(domain: str, mode: str = "vendor") -> dict:
-    """Try scraping, retry once on failure."""
+    """Try scraping, retry once on failure. The per-page socket timeouts and
+    extract_domain's own budget keep any single domain bounded."""
     for attempt in range(2):
         try:
             result = scraper.extract_domain(domain, mode=mode)
-            if "not reachable" in result.get("status", "") and attempt == 0:
+            status = result.get("status", "")
+            if ("not reachable" in status or "timed out" in status) and attempt == 0:
                 continue
             return result
         except Exception as e:
@@ -194,7 +317,8 @@ def _run(job_id: int):
     """Streaming worker with INTERLEAVED retry.
     Failed/no_email domains go back to END of queue immediately.
     Retry happens DURING the campaign, not after."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                wait as futures_wait, FIRST_COMPLETED)
     from collections import deque
     db = SessionLocal()
     try:
@@ -231,6 +355,10 @@ def _run(job_id: int):
             except Exception:
                 pass
 
+        # How many changes to hold before writing them out together
+        COMMIT_EVERY = 25
+        uncommitted = 0
+
         stopped = False
 
         # ROUND 0 = main pass over every pending domain.
@@ -247,9 +375,13 @@ def _run(job_id: int):
                 # Only retry real ERRORS. "no_email" means we checked fine and
                 # the site simply has no address — re-scraping rarely helps and
                 # would double the work on big lists.
+                # Skip DNS-dead hosts entirely: if the domain doesn't resolve,
+                # a second attempt will fail identically, so retrying them just
+                # doubles the time on a list full of dead domains.
                 ids = [r[0] for r in db.query(ScraperJobDomain.id).filter(
                     ScraperJobDomain.job_id == job_id,
-                    ScraperJobDomain.status == "failed").all()]
+                    ScraperJobDomain.status == "failed",
+                    ~ScraperJobDomain.error.like("DNS:%")).all()]
                 label = f"retry round {round_no}"
             if not ids:
                 continue
@@ -259,13 +391,20 @@ def _run(job_id: int):
             futures = {}
 
             def _submit_next():
+                # `uncommitted` is the outer counter, not a fresh local — without
+                # this the very first call raised UnboundLocalError and the whole
+                # job died before scraping a single domain.
+                nonlocal uncommitted
                 while pending_ids:
                     did = pending_ids.popleft()
                     jd = db.get(ScraperJobDomain, did)
                     if not jd:
                         continue
                     jd.status = "scraping"; jd.last_checked = datetime.utcnow()
-                    db.commit()
+                    uncommitted += 1
+                    if uncommitted >= COMMIT_EVERY:
+                        db.commit()
+                        uncommitted = 0
                     fut = pool.submit(_scrape_with_retry, jd.domain, mode)
                     futures[fut] = did
                     return True
@@ -278,18 +417,79 @@ def _run(job_id: int):
             update_every = 10 if len(ids) > 500 else 3
 
             while futures:
-                done_fut = next(iter(as_completed(futures)))
-                did = futures.pop(done_fut)
+                # Wait for whichever workers have finished, then handle them all.
+                #
+                # This used to call as_completed() afresh for every single domain
+                # and take only the first result. Each call registers a waiter on
+                # EVERY outstanding future, so with fifty workers that was fifty
+                # registrations per domain — the throughput collapsed as the job
+                # grew. wait(FIRST_COMPLETED) is built for exactly this.
+                # Short wait so Stop is felt almost instantly and a domain that
+                # overruns its budget can't keep the loop parked for 30s. Most
+                # iterations still return the moment a worker finishes; the
+                # timeout is only the ceiling on how long we sit blocked.
+                done_set, _pending = futures_wait(
+                    list(futures.keys()), timeout=2,
+                    return_when=FIRST_COMPLETED)
 
-                # INSTANT STOP: checked on every single domain.
-                if _stop_flags.get(job_id):
+                if not done_set:
+                    # Nothing finished in the short window. Check for Stop, then
+                    # loop again. If a single domain's worker overran the whole
+                    # domain budget (a pathological site), don't wait on it
+                    # forever — drop that future, mark the domain timed out, and
+                    # let a fresh domain take the slot so no worker sits idle.
+                    if _stop_flags.get(job_id):
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        db.refresh(job)
+                        job.status = "stopped"; db.commit()
+                        stopped = True
+                        break
+                    _slow_ticks = locals().get("_slow_ticks", 0) + 1
+                    if _slow_ticks * 2 >= scraper.DOMAIN_BUDGET + 4 and futures:
+                        # ~26s with zero completions → the whole batch of in-flight
+                        # workers is wedged (typically all stuck in a slow connect
+                        # phase at once). Release ALL of them, not just the oldest,
+                        # mark their domains timed-out, and refill the pool so it
+                        # can move on. Releasing one-at-a-time here left the other
+                        # 48 workers stuck and the job frozen.
+                        for stuck_fut in list(futures.keys()):
+                            stuck_did = futures.pop(stuck_fut, None)
+                            stuck_fut.cancel()
+                            if stuck_did is not None:
+                                try:
+                                    jd = db.get(ScraperJobDomain, stuck_did)
+                                    if jd and jd.status == "scraping":
+                                        jd.status = "failed"
+                                        jd.error = "timeout: no response"
+                                except Exception:
+                                    pass
+                        try:
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+                        _slow_ticks = 0
+                        # Refill the pool with fresh domains
+                        for _ in range(workers):
+                            if not _submit_next():
+                                break
+                        continue
+                    continue
+                _slow_ticks = 0
+
+                for done_fut in done_set:
+                  did = futures.pop(done_fut, None)
+                  if did is None:
+                      continue
+
+                  # INSTANT STOP: checked on every single domain.
+                  if _stop_flags.get(job_id):
                     pool.shutdown(wait=False, cancel_futures=True)
                     db.refresh(job)
                     job.status = "stopped"; db.commit()
                     stopped = True
                     break
 
-                try:
+                  try:
                     jd = db.get(ScraperJobDomain, did)
                     if jd:
                         try:
@@ -297,15 +497,23 @@ def _run(job_id: int):
                         except Exception:
                             result = {"contacts": [], "status": "error", "vendor_signals": {}}
                         _save_result(db, job, jd, result, limit)
-                        db.commit()  # commit so emails appear immediately
+                        # Batched commit: writing after every single domain made
+                        # every worker queue behind the SQLite write lock.
+                        uncommitted += 1
+                        if uncommitted >= COMMIT_EVERY:
+                            db.commit()
+                            uncommitted = 0
                         # NOTE: failed domains are deliberately NOT requeued here.
                         # They're handled in a retry round after the main pass.
-                except Exception:
+                  except Exception:
                     pass
 
-                completed_since_update += 1
-                if completed_since_update >= update_every:
+                  completed_since_update += 1
+                  if completed_since_update >= update_every:
                     try:
+                        if uncommitted:
+                            db.commit()
+                            uncommitted = 0
                         db.refresh(job)
                         if job.status == "stopped":
                             pool.shutdown(wait=False, cancel_futures=True)
@@ -316,8 +524,17 @@ def _run(job_id: int):
                         pass
                     completed_since_update = 0
 
-                _submit_next()
+                  _submit_next()
 
+                if stopped:
+                    break
+
+            if uncommitted:
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                uncommitted = 0
             _refresh_counters()
 
         db.refresh(job)
@@ -333,11 +550,19 @@ def _run(job_id: int):
             job.emails_found = db.query(ScraperResult).filter(ScraperResult.job_id == job_id).count()
             job.status = "completed"; job.updated_at = datetime.utcnow(); db.commit()
         pool.shutdown(wait=False)
-    except Exception:
+    except Exception as run_err:
+        # Report it. Swallowing this silently made a crashed job look like a
+        # finished one, which is how a broken run hid for so long.
+        import traceback
+        print(f"[WarmWire] Job #{job_id} crashed: {type(run_err).__name__}: {run_err}")
+        traceback.print_exc()
         try:
             job = db.get(ScraperJob, job_id)
-            if job: job.status = "completed"; db.commit()
-        except: pass
+            if job:
+                job.status = "error"
+                db.commit()
+        except Exception:
+            pass
     finally:
         db.close()
         _threads.pop(job_id, None)

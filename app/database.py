@@ -8,6 +8,18 @@ engine = create_engine(
     settings.DATABASE_URL,
     # timeout = how long a connection waits for a write lock before erroring
     connect_args={"check_same_thread": False, "timeout": 30},
+    # SQLAlchemy's default pool for SQLite is 5 connections + 10 overflow = 15
+    # TOTAL for the whole app. That is nowhere near enough here: the blog
+    # research engine alone runs a 50-worker pool where every worker opens its
+    # own session, and the dashboard fires a dozen parallel calls on load. Once
+    # all 15 were taken, every other request — including "start a new scrape" —
+    # sat waiting the full 30s pool timeout, silently. That's what made the app
+    # work fine sometimes and hang for minutes other times.
+    # SQLite connections are cheap, and WAL lets them read in parallel.
+    pool_size=30,
+    max_overflow=70,      # 100 total
+    pool_timeout=10,      # and fail loudly instead of hanging if we ever hit it
+    pool_recycle=1800,
 )
 
 
@@ -17,8 +29,10 @@ def _sqlite_pragmas(dbapi_conn, _rec):
     try:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=30000")   # wait up to 30s for a lock
+        cur.execute("PRAGMA busy_timeout=8000")    # fail loudly in 8s, don't hang for 30
         cur.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, much faster
+        cur.execute("PRAGMA wal_autocheckpoint=400")   # checkpoint sooner (~1.6 MB)
+        cur.execute("PRAGMA journal_size_limit=16777216")  # and shrink the file back to <=16 MB
         cur.close()
     except Exception:
         pass
@@ -86,6 +100,61 @@ def _migrate():
                         default = f" DEFAULT '{arg}'"
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
+    # Enforce one email per mode at the DB level. A plain create_all won't add
+    # this to an already-existing table, so we do it here: first remove any
+    # legacy duplicate rows (keeping the earliest id), then build the unique
+    # index. Once the index exists, every future insert of a duplicate fails at
+    # the database, so no code path can reintroduce them.
+    if "outreach_entries" in tables:
+        with engine.connect() as conn:
+            pragma_idx = [r[1] for r in conn.exec_driver_sql(
+                "PRAGMA index_list('outreach_entries')").fetchall()]
+        has_uq = "uq_outreach_mode_email" in pragma_idx
+
+        if not has_uq:
+            with engine.begin() as conn:
+                removed = conn.exec_driver_sql(
+                    "DELETE FROM outreach_entries WHERE id NOT IN ("
+                    "  SELECT MIN(id) FROM outreach_entries GROUP BY mode, lower(email))"
+                ).rowcount
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_outreach_mode_email "
+                    "ON outreach_entries (mode, email)")
+            print(f"[DB] Removed {removed} duplicate outreach row(s); unique "
+                  f"(mode,email) index is now enforced."
+                  if removed else
+                  "[DB] Added unique (mode,email) index on outreach_entries.")
+
+
+def checkpoint_wal(mode: str = "TRUNCATE"):
+    """Fold the -wal file back into the database.
+
+    SQLite can only checkpoint when nothing is holding a transaction open. The
+    scraper keeps a session alive for the length of a job, so checkpoints kept
+    getting skipped and warmwire.db-wal grew to ~50 MB against a 13 MB
+    database. Every read then had to scan that whole WAL index, which is why
+    the dashboard got slower and slower until requests simply timed out.
+    """
+    try:
+        with engine.connect() as conn:
+            row = conn.exec_driver_sql(f"PRAGMA wal_checkpoint({mode})").fetchone()
+        return row
+    except Exception as e:
+        return ("error", str(e))
+
+
+def start_wal_maintenance(interval_seconds: int = 60):
+    """Keep the WAL small in the background, so it can never run away again."""
+    import threading, time
+
+    def _loop():
+        while True:
+            time.sleep(interval_seconds)
+            checkpoint_wal("PASSIVE")
+
+    threading.Thread(target=_loop, daemon=True).start()
+
 
 def init_db():
     # Import ALL models so they register with Base before create_all.
@@ -96,6 +165,10 @@ def init_db():
         _migrate()
     except Exception as e:
         print("migration warning:", e)
+    # Start clean: nothing else is connected yet, so this is the one moment a
+    # full TRUNCATE checkpoint is guaranteed to work.
+    print("[DB] WAL checkpoint at startup:", checkpoint_wal("TRUNCATE"))
+    start_wal_maintenance()
 
 
 # FastAPI dependency: hands a DB session to each request
