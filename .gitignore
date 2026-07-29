@@ -11,3 +11,21 @@ __pycache__/
 .DS_Store
 Thumbs.db
 app_old/
+
+# diagnostic / debug scripts (not part of the app)
+bf.py
+blogfix.py
+blogsites.py
+bw2.py
+bw3.py
+blogwatch.py
+fixlabel.py
+fixroutes.py
+fudiag.py
+futest.py
+jobemails.py
+lblcheck.py
+relabel.py
+scrcheck.py
+scrcheck2.py
+sdiag.py

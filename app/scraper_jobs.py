@@ -139,16 +139,36 @@ def _prepare(job_id: int, domains: list[str], sheet_csv_url: str = ""):
 
         if sheet_csv_url:
             try:
-                import requests, csv, io
-                # (connect timeout, read timeout) — a stalled read now gives up
-                # instead of holding on indefinitely.
-                r = requests.get(sheet_csv_url, timeout=(10, 30))
+                import requests, csv, io, re as _re
+                r = requests.get(sheet_csv_url, timeout=(10, 30),
+                                 headers={"User-Agent": "Mozilla/5.0"})
                 r.raise_for_status()
                 txt = r.text
+                ctype = r.headers.get("content-type", "").lower()
+                # Guard: a sheet that isn't published-to-web returns an HTML login
+                # or error page, not CSV. Detect that instead of treating the
+                # error text as a "domain" (which then crashed the scrape).
+                looks_html = ("<html" in txt[:500].lower()
+                              or "<!doctype" in txt[:500].lower())
+                if looks_html or ("csv" not in ctype and "text/plain" not in ctype
+                                  and "," not in txt[:200] and "\n" not in txt[:200]):
+                    _fail_prepare(db, job,
+                        "That link didn't return CSV. In Google Sheets use "
+                        "File → Share → Publish to web → CSV, and paste that link "
+                        "(it ends with output=csv).")
+                    return
+                # Extract only things that actually look like domains.
+                dom_re = _re.compile(
+                    r"^(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9\-]*\.[a-z0-9\-.]+)",
+                    _re.I)
                 for row in csv.reader(io.StringIO(txt)):
                     for cell in row:
-                        if cell and "." in cell and "@" not in cell:
-                            all_domains.append(cell)
+                        cell = (cell or "").strip()
+                        if not cell or "@" in cell or " " in cell:
+                            continue
+                        m = dom_re.match(cell)
+                        if m:
+                            all_domains.append(m.group(1).lower())
             except Exception as e:
                 _fail_prepare(db, job, f"Could not read the sheet CSV ({type(e).__name__}). "
                                        f"Make sure it's published to the web as CSV.")

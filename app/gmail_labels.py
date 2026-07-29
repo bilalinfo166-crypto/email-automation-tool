@@ -59,7 +59,7 @@ def _stage_of(entry) -> str:
     return ""
 
 
-def labels_for(mode: str, followup_count: int, stage: str = "") -> tuple:
+def labels_for(mode: str, followup_count: int, stage: str = "", category: str = "") -> tuple:
     """(labels to add, labels to remove) for this message.
 
     A thread moves through stages, and the labels follow it:
@@ -67,24 +67,32 @@ def labels_for(mode: str, followup_count: int, stage: str = "") -> tuple:
         follow-up 1..4         -> base + "Follow Up N"  (previous one removed)
         they replied           -> base + "Dealing"      (follow-ups cleared)
         deal closed            -> base + "Deal Done"    ("Dealing" cleared)
+
+    If a campaign category is given (e.g. "SaaS"), the base label becomes
+    "AI SaaS Outreach" so the user can group threads by the category they chose.
     """
     m = (mode or "vendor").lower()
-    base = BASE_LABEL.get(m, BASE_LABEL["vendor"])
+    if category and category.strip():
+        base = f"AI {category.strip()} Outreach"
+    else:
+        base = BASE_LABEL.get(m, BASE_LABEL["vendor"])
     add = [base]
     remove = list(OLD_LABELS.get(m, []))   # clear any label this mode used before
     stage = (stage or "").lower()
 
     if stage == "done":
-        # Closed — the chase is over, so drop everything that implied it wasn't.
-        add.append("Deal Done")
+        # Deal-status labels are disabled by request. Don't add "Deal Done";
+        # just make sure the old status labels are cleared and follow-ups gone.
+        remove.append("Deal Done")
         remove.append("Dealing")
         remove.extend(ALL_FOLLOWUPS)
         return add, remove
 
     if stage == "dealing":
-        # They replied. No more "waiting on them" labels.
-        add.append("Dealing")
+        # They replied. Don't add "Dealing" (disabled); clear follow-up labels
+        # and any stale status labels.
         remove.extend(ALL_FOLLOWUPS)
+        remove.append("Dealing")
         remove.append("Deal Done")
         return add, remove
 
@@ -264,7 +272,7 @@ def label_pending(db, limit: int = 300, backfill: bool = False) -> dict:
                 continue
             try:
                 for e in entries:
-                    add, remove = labels_for(e.mode, e.followup_count, _stage_of(e))
+                    add, remove = labels_for(e.mode, e.followup_count, _stage_of(e), category=getattr(e, 'category', '') or '')
                     if apply_via_imap(mail, e.message_id, add, remove):
                         e.label_state = e.label_target
                         _sender_errors.pop(sender_email, None)
@@ -286,7 +294,7 @@ def label_pending(db, limit: int = 300, backfill: bool = False) -> dict:
             if not creds:
                 continue
             for e in entries:
-                add, remove = labels_for(e.mode, e.followup_count, _stage_of(e))
+                add, remove = labels_for(e.mode, e.followup_count, _stage_of(e), category=getattr(e, 'category', '') or '')
                 try:
                     # gmail_id may be blank for older sends — apply_via_api then
                     # finds the message by its Message-ID instead of skipping it.

@@ -1,6 +1,6 @@
 """Database setup + the Sender table (all sender details live here)."""
 from datetime import datetime, date
-from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, Date, Text, inspect, text, event
+from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, Date, Text, inspect, text, event, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .config import settings
 
@@ -47,11 +47,17 @@ class Base(DeclarativeBase):
 
 class Sender(Base):
     __tablename__ = "senders"
+    # A Gmail address is unique PER MODE, not globally — the same inbox can be a
+    # sender in more than one dashboard (e.g. client + blog), each row keeping
+    # its own counters so the dashboards' data stays separate.
+    __table_args__ = (
+        UniqueConstraint("email", "mode", name="uq_sender_email_mode"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String, index=True)
     name: Mapped[str] = mapped_column(String, default="")
-    mode: Mapped[str] = mapped_column(String, default="vendor")  # vendor / client
+    mode: Mapped[str] = mapped_column(String, default="vendor")  # vendor / client / blog
     method: Mapped[str] = mapped_column(String)          # "oauth" or "app_password"
 
     # secrets (encrypted). Only one is used depending on method.
@@ -125,6 +131,34 @@ def _migrate():
                   f"(mode,email) index is now enforced."
                   if removed else
                   "[DB] Added unique (mode,email) index on outreach_entries.")
+
+    # Senders: the old schema made email globally unique, which blocked using
+    # the same Gmail in two dashboards (client + blog). Drop that index and add
+    # a (email, mode) unique index instead, so an address can exist once per
+    # mode with its own counters.
+    if "senders" in tables:
+        with engine.connect() as conn:
+            sidx = [(r[1], bool(r[2])) for r in conn.exec_driver_sql(
+                "PRAGMA index_list('senders')").fetchall()]
+        has_new = any(n == "uq_sender_email_mode" for n, _ in sidx)
+        if not has_new:
+            with engine.begin() as conn:
+                # Drop any old UNIQUE index that covers email alone.
+                for name, uniq in sidx:
+                    if not uniq:
+                        continue
+                    cols = [r[2] for r in conn.exec_driver_sql(
+                        f"PRAGMA index_info('{name}')").fetchall()]
+                    if cols == ["email"]:
+                        try:
+                            conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{name}"')
+                        except Exception:
+                            pass
+                conn.exec_driver_sql(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_email_mode "
+                    "ON senders (email, mode)")
+            print("[DB] Senders: email is now unique per-mode "
+                  "(same address can be used in more than one dashboard).")
 
 
 def checkpoint_wal(mode: str = "TRUNCATE"):

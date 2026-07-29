@@ -414,38 +414,94 @@ def send_test(db, to_email: str, mode: str = "vendor", sender_email: str = "",
             "note": "Nothing in your real send list was changed."}
 
 
+def is_mode_enabled(db, mode: str) -> bool:
+    """Is the follow-up switch ON for this dashboard (vendor/client/blog)?
+    Defaults to ON if never set, so existing behaviour is unchanged until the
+    user flips a toggle off. Stored in app_settings so it survives restarts."""
+    from .crm_models import AppSetting
+    try:
+        row = db.query(AppSetting).filter(
+            AppSetting.key == f"followup_enabled_{mode}").first()
+        if row is None:
+            return True                 # default ON
+        return row.value == "1"
+    except Exception:
+        return True
+
+
+def set_mode_enabled(db, mode: str, enabled: bool):
+    """Turn the follow-up switch on/off for one dashboard, persisted in the DB."""
+    from .crm_models import AppSetting
+    key = f"followup_enabled_{mode}"
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    if row is None:
+        row = AppSetting(key=key, value="1" if enabled else "0")
+        db.add(row)
+    else:
+        row.value = "1" if enabled else "0"
+        row.updated_at = datetime.utcnow()
+    db.commit()
+    return enabled
+
+
+def _is_sunday():
+    """Sunday = no follow-ups (user's rule). Uses local time so it matches the
+    user's actual calendar day, not UTC."""
+    import datetime as _dt
+    return _dt.datetime.now().weekday() == 6   # Mon=0 ... Sun=6
+
+
 def _loop(interval_minutes: int, delay_hours: int, max_followups: int,
           batch_limit: int = DAILY_CAP, per_sender: int = PER_SENDER_PER_HOUR):
     """Send a batch per run rather than the whole backlog.
 
-    Runs hourly. Each run may send up to PER_SENDER_PER_HOUR (15) per sender and
-    is additionally bounded by the global DAILY_CAP (60) — run_followups counts
-    what already went out today and stops at the cap. Fewer is fine; we only
-    send what's genuinely due.
+    Runs hourly. Every run processes EACH mode (vendor, client, blog) separately
+    so no single mode starves the others — the old code ran one un-moded query
+    ordered by sent_at, which filled entirely with the oldest (client) contacts
+    and vendor/blog never got a turn. That's why vendor follow-ups weren't going
+    out. The global DAILY_CAP (60) is shared across all three modes.
+
+    Sundays are skipped entirely (user's rule).
     """
     global _stop
+    modes = ["vendor", "client", "blog"]
     while not _stop:
         for _ in range(interval_minutes * 60):
             if _stop:
                 return
             time.sleep(1)
+
+        if _is_sunday():
+            print("[FollowUp] Sunday — no follow-ups today (resumes Monday).")
+            continue
+
         db = SessionLocal()
         try:
-            due = find_due(db, delay_hours=delay_hours,
-                           max_followups=max_followups, limit=500)
-            if due:
-                print(f"[FollowUp] {len(due)} contact(s) due — sending up to "
-                      f"{batch_limit} this round (daily cap {DAILY_CAP}).")
-            res = run_followups(db, delay_hours=delay_hours,
-                                max_followups=max_followups, limit=batch_limit,
-                                per_sender_limit=per_sender)
-            if res.get("daily_cap_reached"):
-                print(f"[FollowUp] Daily cap of {DAILY_CAP} already reached "
-                      f"({res.get('sent_today')} sent today) — pausing until tomorrow.")
-            elif res["sent"]:
-                spread = res.get("per_sender") or {}
-                detail = ", ".join(f"{k.split('@')[0]}:{v}" for k, v in spread.items())
-                print(f"[FollowUp] Sent {res['sent']} reminder(s) — {detail}")
+            total_sent = 0
+            for m in modes:
+                if _stop:
+                    break
+                # Respect the per-dashboard On/Off switch. If the user turned
+                # follow-ups off for this mode, skip it entirely.
+                if not is_mode_enabled(db, m):
+                    continue
+                # run_followups enforces the shared daily cap internally, so
+                # once 60 have gone out today the later modes send 0.
+                res = run_followups(db, mode=m, delay_hours=delay_hours,
+                                    max_followups=max_followups, limit=batch_limit,
+                                    per_sender_limit=per_sender)
+                if res.get("daily_cap_reached"):
+                    print(f"[FollowUp] Daily cap of {DAILY_CAP} reached "
+                          f"({res.get('sent_today')} sent today) — pausing until tomorrow.")
+                    break
+                if res.get("sent"):
+                    spread = res.get("per_sender") or {}
+                    detail = ", ".join(f"{k.split('@')[0]}:{v}" for k, v in spread.items())
+                    print(f"[FollowUp] [{m}] Sent {res['sent']} reminder(s) — {detail}")
+                    total_sent += res["sent"]
+            if total_sent == 0:
+                # nothing due across any mode this round — stay quiet
+                pass
         except Exception as e:
             print(f"[FollowUp] Poll error: {e}")
         finally:

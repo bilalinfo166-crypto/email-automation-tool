@@ -417,6 +417,8 @@
      both applied to the same element — which is why it looked like a static
      blob instead of spinning. These resets cancel the pill styling. */
   .spin{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:sp 1s linear infinite;flex:0 0 auto;display:inline-block;background:none;padding:0;font-size:0;line-height:0;vertical-align:-2px;box-sizing:border-box}
+  .hskel{height:72px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;background:linear-gradient(90deg,var(--panel-2) 25%,var(--line) 37%,var(--panel-2) 63%);background-size:400% 100%;animation:shimmer 1.4s ease infinite}
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
   /* Perfect round spinner for the running badge (equal width/height/border) */
   .run-spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle;box-sizing:border-box;flex:0 0 auto}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -620,6 +622,32 @@
   .demo-canvas{flex:1;display:grid;grid-template-columns:1fr 296px;min-height:0}
   .flow{position:relative;background:#f6f8fb;background-image:radial-gradient(#e0e6ee 1px,transparent 1px);background-size:18px 18px;overflow:hidden}
   .flow .wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  /* Wires draw themselves in sequence, then loop */
+  .flow .wire{stroke-dasharray:200;stroke-dashoffset:200;animation:wireDraw 4.5s ease-in-out infinite}
+  .flow .w1{animation-delay:0s}
+  .flow .w2{animation-delay:.45s}
+  .flow .w3{animation-delay:.9s}
+  .flow .w4{animation-delay:.9s}
+  .flow .w5{animation-delay:1.35s}
+  @keyframes wireDraw{
+    0%{stroke-dashoffset:200}
+    18%,86%{stroke-dashoffset:0}
+    100%{stroke-dashoffset:0}
+  }
+  .flow .pulse{filter:drop-shadow(0 0 4px rgba(23,178,106,.6))}
+  /* Nodes pop in one after another, looping with the wires */
+  .flow .node,.flow .pill-node{animation:nodePop 4.5s ease-in-out infinite}
+  .flow .pill-node{animation-delay:0s}
+  .flow .node:nth-of-type(2){animation-delay:.25s}   /* Email */
+  .flow .node:nth-of-type(3){animation-delay:.6s}    /* Condition */
+  .flow .node:nth-of-type(4){animation-delay:1s}     /* Follow-up */
+  .flow .node:nth-of-type(5){animation-delay:1.05s}  /* Goal */
+  .flow .node:nth-of-type(6){animation-delay:1.45s}  /* Message */
+  @keyframes nodePop{
+    0%{transform:translateY(6px) scale(.96);opacity:.35}
+    12%,90%{transform:translateY(0) scale(1);opacity:1}
+    100%{transform:translateY(0) scale(1);opacity:1}
+  }
   .node{position:absolute;background:#fff;border:1px solid #e6ebf0;border-radius:12px;box-shadow:0 8px 20px -12px rgba(12,21,36,.35);width:186px;padding:10px 12px}
   .node .nh{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:800}
   .node .nh .d{width:18px;height:18px;border-radius:6px;display:grid;place-items:center}
@@ -881,12 +909,17 @@
             <div class="demo-canvas">
               <div class="flow">
                 <svg class="wires" viewBox="0 0 586 430" preserveAspectRatio="none">
-                  <path d="M250 40 L250 60" stroke="#cbd5e1" stroke-width="2" fill="none"/>
-                  <path d="M250 120 L250 148" stroke="#cbd5e1" stroke-width="2" fill="none"/>
-                  <path d="M250 214 C250 250 130 236 130 268" stroke="#e0483b" stroke-width="2" fill="none"/>
-                  <path d="M250 214 C250 250 430 236 430 268" stroke="#17b26a" stroke-width="2" fill="none"/>
-                  <path d="M430 330 L430 356" stroke="#cbd5e1" stroke-width="2" fill="none"/>
+                  <path class="wire w1" d="M250 40 L250 60" stroke="#cbd5e1" stroke-width="2" fill="none"/>
+                  <path class="wire w2" d="M250 120 L250 148" stroke="#cbd5e1" stroke-width="2" fill="none"/>
+                  <path class="wire w3" d="M250 214 C250 250 130 236 130 268" stroke="#e0483b" stroke-width="2" fill="none"/>
+                  <path class="wire w4" d="M250 214 C250 250 430 236 430 268" stroke="#17b26a" stroke-width="2" fill="none"/>
+                  <path class="wire w5" d="M430 330 L430 356" stroke="#cbd5e1" stroke-width="2" fill="none"/>
                   <circle cx="250" cy="214" r="3" fill="#94a3b8"/>
+                  <circle class="pulse" r="4" fill="#17b26a">
+                    <animateMotion dur="4.5s" repeatCount="indefinite" keyPoints="0;0.22;0.5;0.78;1" keyTimes="0;0.25;0.5;0.75;1" calcMode="linear"
+                      path="M250 40 L250 60 M250 120 L250 148 M250 214 C250 250 430 236 430 268 L430 356"/>
+                    <animate attributeName="opacity" dur="4.5s" repeatCount="indefinite" values="0;1;1;1;0" keyTimes="0;0.1;0.5;0.9;1"/>
+                  </circle>
                 </svg>
                 <div class="pill-node" style="left:198px;top:24px">Start</div>
                 <div class="node" style="left:157px;top:60px"><div class="nh"><span class="d" style="background:#e8effe"><svg viewBox="0 0 24 24" fill="none" stroke="#2b4bf2" stroke-width="2.2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg></span>Email</div><p>Intro: guest post on {site_name}</p></div>
@@ -953,6 +986,13 @@
           <p>Blog sites add karo &mdash; tool unke recent articles ke external links nikaalta hai. Jo sites paid guest posts kara rahi hain, wo aap ke hot clients hain.</p>
           <ul><li>Add blog sites &amp; set time range</li><li>Extract external links automatically</li><li>Scrape emails &amp; pitch as clients</li></ul>
           <button class="lbtn primary" style="width:100%" onclick="chooseMode('blog')">Open Blog Research &rarr;</button>
+        </div>
+        <div class="mode-card">
+          <div class="ic" style="background:#eef2ff"><svg viewBox="0 0 24 24" fill="none" stroke="#4f46e5" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+          <h3>SEO Agency Finder</h3>
+          <p>Keyword + location do &mdash; tool SEO/marketing agencies aur professionals dhundta hai aur unke public business emails nikaalta hai. Collaboration ke liye pitch karo.</p>
+          <ul><li>Search by keyword &amp; location</li><li>Find agencies from public websites</li><li>Extract public emails &amp; outreach</li></ul>
+          <button class="lbtn primary" style="width:100%" onclick="chooseMode('seo')">Open SEO Agency Finder &rarr;</button>
         </div>
       </div>
     </div>
@@ -1199,6 +1239,7 @@
   <aside class="side">
     <div class="nav-label" style="margin-top:6px">Workspace</div>
     <div class="nav on" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>Overview</div>
+    <div class="nav" data-view="autopilot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="3.5"/></svg>Autopilot <span class="badge" id="navAutopilot" style="background:#16a34a;color:#fff">auto</span></div>
     <div class="nav" data-view="senders"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 8l8 5 8-5"/></svg>Senders <span class="badge" id="navSenders">0</span></div>
     <div class="nav" data-view="prospecting"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>Email Scraper <span class="badge">new</span></div>
     <div class="nav" data-view="warmup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3c1.5 3-1.5 4 0 7 3-2 3-5 3-5 1.5 2 3 3.5 3 7a6 6 0 11-12 0c0-2 1-3.5 2-5 .5 2 2 2 2 2-1-3 0-4 2-6z"/></svg>Warmup <span class="badge">live</span></div>
@@ -1207,6 +1248,7 @@
     <div class="nav" data-view="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 19h16M8 15l3-4 3 2 4-6"/></svg>Analytics</div>
     <div class="nav" data-view="deals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="7" cy="6" r="1.6" fill="currentColor"/><circle cx="7" cy="12" r="1.6" fill="currentColor"/></svg>Deals <span class="badge" id="navDeals">0</span></div>
     <div class="nav" data-view="blogresearch" id="navBlogResearch" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/><path d="M9 7h7M9 11h5"/></svg>Blog Research</div>
+    <div class="nav" data-view="seofinder" id="navSeoFinder" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>SEO Finder</div>
     <div style="margin-top:auto;padding:8px 0 2px"><div class="nav" onclick="backToModes()" style="color:#5a6b7b;cursor:pointer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>Back to menu</div></div>
     <div class="side-foot"><div class="acct"><div class="av">A</div><div class="who">Acme Growth<span>growth@acme-outreach.com</span></div></div></div>
   </aside>
@@ -1242,7 +1284,12 @@
           <div class="ch-head">
             <h3>Follow-ups</h3>
             <div style="display:flex;gap:8px;align-items:center">
-              <span class="pill g" id="fuAuto" style="font-size:10px">auto</span>
+              <label id="fuToggleWrap" title="Turn follow-ups on/off for this dashboard" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;font-weight:600;user-select:none">
+                <span id="fuToggleLabel" style="color:var(--faint)">Follow-ups</span>
+                <span id="fuToggleSwitch" onclick="toggleFollowups()" style="position:relative;display:inline-block;width:40px;height:22px;background:#cbd5e1;border-radius:22px;transition:background .2s">
+                  <span id="fuToggleKnob" style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)"></span>
+                </span>
+              </label>
               <button class="btn sm" onclick="runFollowupsNow()">Send a batch now</button>
             </div>
           </div>
@@ -1311,6 +1358,90 @@
         </div>
       </section>
 
+      <!-- AUTOPILOT -->
+      <section class="panel-view" id="autopilot">
+        <div class="card ch">
+          <div class="ch-head">
+            <div><h3 style="margin:0">Autopilot</h3>
+              <p style="font-size:12px;color:var(--faint);margin:2px 0 0">Set it once — WarmWire scrapes prospects, builds campaigns, sends, and follows up automatically. Safe limits always on.</p></div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <span id="apToggleLabel" style="font-size:13px;font-weight:700;color:var(--faint)">OFF</span>
+              <span id="apSwitch" onclick="toggleAutopilot()" style="position:relative;display:inline-block;width:48px;height:26px;background:#cbd5e1;border-radius:26px;transition:background .2s">
+                <span id="apKnob" style="position:absolute;top:3px;left:3px;width:20px;height:20px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></span>
+              </span>
+            </label>
+          </div>
+          <div id="apStatusBar" style="padding:12px 14px;background:var(--panel-2);border-radius:10px;font-size:13px;color:var(--muted);margin-bottom:16px">Loading…</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+            <div>
+              <label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Domains / sites to find prospects on</label>
+              <textarea id="apDomains" rows="5" placeholder="example.com&#10;anothersite.com&#10;(one per line)" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Send from these senders</label>
+              <div id="apSenders" style="border:1px solid var(--line);border-radius:10px;padding:10px;max-height:140px;overflow:auto;font-size:13px">Loading senders…</div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-top:16px">
+            <div><label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Max emails / day</label>
+              <input id="apDaily" type="number" min="1" max="200" value="50" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:9px;font-size:13px;box-sizing:border-box"></div>
+            <div><label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Send from (hour)</label>
+              <input id="apStart" type="number" min="0" max="23" value="9" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:9px;font-size:13px;box-sizing:border-box"></div>
+            <div><label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Send until (hour)</label>
+              <input id="apEnd" type="number" min="0" max="23" value="18" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:9px;font-size:13px;box-sizing:border-box"></div>
+          </div>
+
+          <div style="display:flex;gap:10px;margin-top:18px;align-items:center">
+            <button class="btn primary" onclick="saveAutopilot()">Save settings</button>
+            <button class="btn sm" onclick="runAutopilotNow()" style="background:#2B4BF2;color:#fff">Run one cycle now</button>
+            <span id="apSaveMsg" style="font-size:12px;color:var(--green)"></span>
+          </div>
+        </div>
+
+        <div class="note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><div><b>Kaise kaam karta hai</b><p>Autopilot ON karo → har 15 min ye check karta hai: pending prospects nahi? to domains se <b>scrape</b> karta hai. Prospects ready? to <b>campaign banata</b> hai aur verified senders se <b>send</b> karta hai (chhote batch mein). Reply na aaye to <b>follow-up</b> khud jaata hai. <b>Safety:</b> roz max limit (200 tak), sirf verified senders, naye inbox skip, sirf set kiye time mein send. Sunday follow-up off.</p></div></div>
+      </section>
+
+      <!-- SEO AGENCY FINDER -->
+      <section class="panel-view" id="seofinder">
+        <div class="card ch">
+          <div class="ch-head">
+            <div><h3 style="margin:0">SEO Agency Finder</h3>
+              <p style="font-size:12px;color:var(--faint);margin:2px 0 0">Keyword + location do — tool matching agencies dhundta hai aur public business emails nikaalta hai.</p></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div>
+              <label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Keywords</label>
+              <div id="seoKwChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+              <input id="seoKeywords" placeholder="SEO agency, digital marketing, link building…" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:13px;box-sizing:border-box">
+              <div style="font-size:11px;color:var(--faint);margin-top:6px">Quick add: <a onclick="seoAddKw('SEO agency')" style="color:var(--brand);cursor:pointer">SEO agency</a> · <a onclick="seoAddKw('digital marketing')" style="color:var(--brand);cursor:pointer">digital marketing</a> · <a onclick="seoAddKw('link building')" style="color:var(--brand);cursor:pointer">link building</a> · <a onclick="seoAddKw('local SEO')" style="color:var(--brand);cursor:pointer">local SEO</a></div>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Location (optional)</label>
+              <input id="seoLocation" placeholder="e.g. London, New York, Dubai" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:13px;box-sizing:border-box;margin-bottom:8px">
+              <label style="font-size:12px;font-weight:700;color:var(--muted);display:block;margin-bottom:6px">Mode</label>
+              <select id="seoSearchMode" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:13px;box-sizing:border-box">
+                <option value="agency">Agencies / companies</option>
+                <option value="people">People / professionals</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:16px;align-items:center">
+            <button class="btn primary" onclick="startSeoSearch()">Start search</button>
+            <span id="seoSearchMsg" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+        </div>
+
+        <div class="card ch">
+          <div class="ch-head"><h3 style="margin:0">Live results</h3><span class="pill b" id="seoLiveBadge">live</span></div>
+          <div id="seoStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:14px"></div>
+          <div id="seoResults"><div style="color:var(--faint);font-size:13px;padding:8px">Search chalao — results yahan live aayenge.</div></div>
+        </div>
+
+        <div class="note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><div><b>Kaise kaam karta hai</b><p>Keyword + location se tool matching business websites dhundta hai, phir unke <b>public pages</b> (contact, about, team, footer) se business emails nikaalta hai — bilkul legal, sirf publicly available info. LinkedIn/Google scraping nahi (unke terms ke against). Jo leads milein, unhe existing senders/templates se pitch karo.</p></div></div>
+      </section>
+
       <!-- SENDERS -->
       <section class="panel-view" id="senders">
         <div class="card ch">
@@ -1344,24 +1475,33 @@
       <!-- WARMUP -->
       <section class="panel-view" id="warmup">
         <div class="card ch">
-          <div class="ch-head"><h3>Email Warmup Engine</h3>
+          <div class="ch-head">
+            <div><h3 style="margin:0">Deliverability Center</h3>
+              <p style="font-size:12px;color:var(--faint);margin:2px 0 0">Live sender health from real signals — warmup, bounce, replies, DNS auth.</p></div>
             <div style="display:flex;gap:8px">
-              <button class="btn primary sm" onclick="startWarmup()">Start Warmup</button>
-              <button class="btn sm" onclick="runWarmupOnce()" style="background:#2B4BF2;color:#fff">Run Once (test)</button>
+              <button class="btn primary sm" onclick="startWarmup()">Start warmup</button>
+              <button class="btn sm" onclick="runWarmupOnce()" style="background:#2B4BF2;color:#fff">Run once</button>
               <button class="btn sm" onclick="stopWarmup()" style="color:var(--red)">Stop</button>
             </div>
           </div>
-          <div id="warmupStatus" style="padding:12px 14px;background:var(--panel-2);border-radius:8px;font-size:13px;color:var(--muted);margin-bottom:12px">Warmup status: checking...</div>
-          <div id="warmupStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px"></div>
+          <div id="dcSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:14px"></div>
+          <div id="warmupStatus" style="padding:10px 14px;background:var(--panel-2);border-radius:10px;font-size:12px;color:var(--muted)">Loading…</div>
         </div>
         <div class="card ch">
-          <div class="ch-head"><h3>Warmup Activity — per sender</h3><span class="pill b" id="wLiveBadge">live</span></div>
-          <div class="slist">
-            <div class="srow head" style="grid-template-columns:1.5fr .8fr .8fr .8fr"><span>Sender</span><span>Warmup sent today</span><span>Total sent</span><span>State</span></div>
-            <div id="warmupSenderRows"></div>
-          </div>
+          <div class="ch-head"><h3 style="margin:0">Fleet health trend</h3><span class="pill b">live · 30 days</span></div>
+          <div id="fleetChart" style="min-height:180px"></div>
         </div>
-        <div class="note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><div><b>Cross-domain warmup pool</b><p>Warmup emails sirf <b>alag domains</b> ke beech jaati hain — kabhi same domain (jaise marita@uplyncio aur helen@uplyncio) ek doosre ko nahi bhejti, kyunki Gmail wo pakad leta hai. Jaise jaise zyada users apne senders add karte hain, pool barha hota hai aur warmup zyada natural + effective hota hai. Har mail ke subject par <b>WU</b> (Warm Up) hota hai. Receiver: spam se inbox laata hai, important mark karta hai, read karta hai, reply karta hai. Daily 15-20 per sender.</p></div></div>
+        <div class="card ch">
+          <div class="ch-head">
+            <h3 style="margin:0">Senders</h3>
+            <div style="display:flex;gap:8px;align-items:center">
+              <span class="pill b" id="wLiveBadge">live</span>
+              <button class="btn sm" onclick="loadDeliverabilityCenter()" style="background:#2B4BF2;color:#fff">Refresh</button>
+            </div>
+          </div>
+          <div id="dcRows"><div class="hskel"></div><div class="hskel"></div><div class="hskel"></div></div>
+        </div>
+        <div class="note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><div><b>Cross-domain warmup pool</b><p>Warmup emails sirf <b>alag domains</b> ke beech jaati hain — kabhi same domain ek doosre ko nahi bhejti (Gmail pakad leta hai). Har mail ke subject par <b>WU</b> hota hai. Receiver: spam se inbox, important mark, read, reply. Daily 15-20 per sender.</p></div></div>
       </section>
 
       <!-- CAMPAIGNS -->
@@ -1376,25 +1516,80 @@
             </div>
           </div>
 
-          <!-- Section 1: Basics -->
+          <!-- Section 1: Name -->
           <div class="cc-section">
-            <div class="cc-label"><span class="cc-num">1</span>Campaign details</div>
+            <div class="cc-label"><span class="cc-num">1</span>Campaign ka naam</div>
+            <div class="cc-field">
+              <input type="text" id="campName" placeholder="e.g. March SaaS Outreach" oninput="updateEstimate()">
+            </div>
+          </div>
+
+          <!-- Section 1b: Data source chooser (tool data vs own sheet) -->
+          <div class="cc-section">
+            <div class="cc-label"><span class="cc-num">2</span>Emails kahan se bhejni hain?</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+              <div id="srcToolCard" onclick="setCampSource('tool')" style="cursor:pointer;border:2px solid var(--brand);border-radius:12px;padding:16px;transition:all .15s">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span id="srcToolRadio" style="width:16px;height:16px;border-radius:50%;border:2px solid var(--brand);display:inline-flex;align-items:center;justify-content:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--brand)"></span></span><b style="font-size:14px">Tool ka data</b></div>
+                <p style="font-size:12px;color:var(--muted);margin:0">Jo emails tool ne scrape kiye (Email Scraper / Blog Research se). <span id="srcToolCount" style="color:var(--brand);font-weight:600"></span></p>
+              </div>
+              <div id="srcSheetCard" onclick="setCampSource('sheet')" style="cursor:pointer;border:2px solid var(--line);border-radius:12px;padding:16px;transition:all .15s">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span id="srcSheetRadio" style="width:16px;height:16px;border-radius:50%;border:2px solid var(--line);display:inline-flex;align-items:center;justify-content:center"></span><b style="font-size:14px">Apni sheet</b></div>
+                <p style="font-size:12px;color:var(--muted);margin:0">Apna data upload karo (CSV ya Google Sheet link). Sirf yehi bhejenge, tool ka data nahi.</p>
+              </div>
+            </div>
+
+            <!-- Sheet upload panel (only when 'sheet' chosen) -->
+            <div id="campSheetPanel" style="display:none;background:var(--panel-2);border-radius:12px;padding:16px">
+              <div class="cc-grid">
+                <div class="cc-field">
+                  <label>CSV file upload</label>
+                  <input type="file" id="campCsvFile" accept=".csv" onchange="handleCsvFile(event)" style="font-size:13px">
+                  <span class="cc-hint">CSV mein <b>email</b> column ho (aur optional <b>domain</b>).</span>
+                </div>
+                <div class="cc-field">
+                  <label>Ya Google Sheet link (publish-to-web CSV)</label>
+                  <input type="text" id="campCsvUrl" placeholder="https://docs.google.com/…/pub?output=csv" style="font-size:12px">
+                  <button class="btn sm" style="margin-top:6px;background:#2B4BF2;color:#fff" onclick="checkSheet()">Check sheet</button>
+                </div>
+              </div>
+              <div id="campCsvStatus" style="font-size:13px;margin-top:12px"></div>
+            </div>
+          </div>
+
+          <!-- Section: how many + category -->
+          <div class="cc-section">
+            <div class="cc-label"><span class="cc-num">3</span>Kitne bhejne hain &amp; category</div>
             <div class="cc-grid">
               <div class="cc-field">
-                <label>Campaign ka naam</label>
-                <input type="text" id="campName" placeholder="e.g. March SEO Outreach" oninput="updateEstimate()">
+                <label>Total kitne emails? <span id="campAvailNote" style="font-weight:400;color:var(--faint)"></span></label>
+                <input type="number" id="campTarget" value="0" min="0" oninput="updateEstimate()">
+                <span class="cc-hint">0 = saare available emails bhejo</span>
               </div>
               <div class="cc-field">
-                <label>Total kitne emails bhejni hain?</label>
-                <input type="number" id="campTarget" value="0" min="0" oninput="updateEstimate()">
-                <span class="cc-hint">0 = list ke saare emails ko bhejo</span>
+                <label>Category (Gmail label ke liye)</label>
+                <select id="campCategory" onchange="updateCatLabel()">
+                  <option value="">— select —</option>
+                  <option value="SaaS">SaaS</option>
+                  <option value="Home">Home</option>
+                  <option value="Fashion">Fashion</option>
+                  <option value="Health">Health</option>
+                  <option value="Finance">Finance</option>
+                  <option value="Tech">Tech</option>
+                  <option value="Travel">Travel</option>
+                  <option value="Food">Food</option>
+                  <option value="Education">Education</option>
+                  <option value="Real Estate">Real Estate</option>
+                  <option value="__custom">+ Custom…</option>
+                </select>
+                <input type="text" id="campCategoryCustom" placeholder="Apni category likho" style="display:none;margin-top:6px;font-size:13px" oninput="updateCatLabel()">
+                <span class="cc-hint">Label banega: <b id="campCatPreview">AI … Outreach</b></span>
               </div>
             </div>
           </div>
 
-          <!-- Section 2: Pacing -->
+          <!-- Section: Pacing -->
           <div class="cc-section">
-            <div class="cc-label"><span class="cc-num">2</span>Har email ke beech ka gap</div>
+            <div class="cc-label"><span class="cc-num">4</span>Har email ke beech ka gap</div>
             <div class="cc-grid">
               <div class="cc-field">
                 <label>Har email ke beech random gap</label>
@@ -1405,7 +1600,7 @@
                   <option value="30-60">30 to 60 seconds (random)</option>
                   <option value="60-120">1 to 2 minutes (random)</option>
                 </select>
-                <span class="cc-hint">Har baar alag time (fixed nahi) — Gmail ko pattern nahi dikhta, zyada natural</span>
+                <span class="cc-hint">Har baar alag time — Gmail ko pattern nahi dikhta, zyada natural</span>
               </div>
               <div class="cc-field">
                 <label>Ek baar mein kitni emails (batch)?</label>
@@ -1423,7 +1618,7 @@
 
           <!-- Section 3: Timing -->
           <div class="cc-section">
-            <div class="cc-label"><span class="cc-num">3</span>Kab bhejni hain?</div>
+            <div class="cc-label"><span class="cc-num">5</span>Kab bhejni hain?</div>
             <div class="cc-grid">
               <div class="cc-field">
                 <label>Date & time set karo <span style="font-weight:400;color:var(--faint)">(optional)</span></label>
@@ -1443,7 +1638,7 @@
 
           <!-- Section 4: Senders -->
           <div class="cc-section">
-            <div class="cc-label"><span class="cc-num">4</span>Kaunse senders se bhejni hain?</div>
+            <div class="cc-label"><span class="cc-num">6</span>Kaunse senders se bhejni hain?</div>
             <div id="campSenderPicker" class="cc-senders"></div>
           </div>
 
@@ -1940,7 +2135,7 @@ function senderRowHTML(s){
   var sid=s.id.replace('s','');
   return '<div class="srow" style="grid-template-columns:1.5fr .7fr .8fr .7fr .6fr auto" onclick="openSender(\''+s.id+'\')">'+
     '<div class="who2"><div class="av" style="background:'+s.color+'">'+initials(s.name)+'</div><div style="min-width:0"><div class="em">'+s.email+'</div><div class="sub">'+s.name+' · '+s.conn+'</div></div></div>'+
-    '<div class="health"><div class="hbar"><i style="width:'+s.health+'%;background:'+hColor(s.health)+'"></i></div><b style="color:'+hColor(s.health)+'">'+s.health+'</b></div>'+
+    '<div class="health" style="display:flex;align-items:center;gap:8px">'+_healthRing(s.health,38)+(s.level?'<span style="font-size:10px;color:'+hColor(s.health)+';font-weight:700">'+s.level+'</span>':'')+'</div>'+
     '<div class="prog"><div class="pb"><i style="width:'+Math.round(s.today/s.cap*100)+'%"></i></div><small>'+s.today+' / '+s.cap+'</small></div>'+
     '<div><span class="state"><span class="d" style="background:'+stColor(s.state)+'"></span>'+(s.warmup?s.state:'off')+'</span></div>'+
     '<div style="font-family:var(--mono);font-size:11px">'+s.total.toLocaleString()+' sent</div>'+
@@ -1956,7 +2151,7 @@ function renderSenders(){
   if(ovs) ovs.innerHTML=senders.slice(0,5).map(s=>
     '<div class="srow" style="grid-template-columns:1.6fr .8fr auto 16px" onclick="openSender(\''+s.id+'\')">'+
     '<div class="who2"><div class="av" style="background:'+s.color+'">'+initials(s.name)+'</div><div style="min-width:0"><div class="em">'+s.email+'</div><div class="sub">'+s.today+' sent today</div></div></div>'+
-    '<div class="health"><div class="hbar"><i style="width:'+s.health+'%;background:'+hColor(s.health)+'"></i></div><b style="color:'+hColor(s.health)+'">'+s.health+'</b></div>'+
+    '<div class="health" style="display:flex;align-items:center;gap:6px">'+_healthRing(s.health,32)+'</div>'+
     '<div><span class="state"><span class="d" style="background:'+stColor(s.state)+'"></span>'+s.state+'</span></div>'+
     '<svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></div>').join('');
   var ns=document.getElementById('navSenders'); if(ns) ns.textContent=senders.length;
@@ -1966,6 +2161,7 @@ function renderSenders(){
 }
 var campSelectedSenders=[];
 function renderCampaigns(){
+  try{ if(typeof _campSource!=='undefined') setCampSource(_campSource||'tool'); }catch(e){}
   apiCall('/senders?mode='+apiMode()).then(rows=>{
     var picker=document.getElementById('campSenderPicker');
     if(picker){
@@ -2034,6 +2230,121 @@ function toggleCampSender(btn){
   else {campSelectedSenders.push(em);btn.classList.add('on');}
   updateEstimate();
 }
+var _campCsvRows=[];   // parsed {domain,email} from uploaded sheet
+function _parseCsv(text){
+  var lines=text.split(/\r?\n/).filter(function(l){return l.trim();});
+  if(!lines.length) return [];
+  // find header columns
+  var header=lines[0].split(',').map(function(h){return h.trim().toLowerCase().replace(/^"|"$/g,'');});
+  var di=header.findIndex(function(h){return h.indexOf('domain')>=0||h.indexOf('website')>=0||h.indexOf('site')>=0;});
+  var ei=header.findIndex(function(h){return h.indexOf('email')>=0||h.indexOf('mail')>=0;});
+  var rows=[], start=1;
+  // if no header row detected, treat all lines as data with col0=domain col1=email
+  if(di<0 && ei<0){ di=0; ei=1; start=0; }
+  for(var i=start;i<lines.length;i++){
+    var c=lines[i].split(',').map(function(x){return x.trim().replace(/^"|"$/g,'');});
+    var email=ei>=0?c[ei]:''; var domain=di>=0?c[di]:'';
+    if(email && email.indexOf('@')>0){ rows.push({domain:domain||email.split('@')[1],email:email}); }
+  }
+  return rows;
+}
+function handleCsvFile(ev){
+  var f=ev.target.files&&ev.target.files[0]; if(!f)return;
+  var st=document.getElementById('campCsvStatus'); st.innerHTML='<span class="spin"></span> Reading…';
+  var rd=new FileReader();
+  rd.onload=function(){ _campCsvRows=_parseCsv(rd.result);
+    if(_campCsvRows.length){
+      st.innerHTML='<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px"><b style="color:#16a34a">✓ File mein '+_campCsvRows.length+' emails mile</b><div style="font-size:12px;color:var(--muted);margin-top:4px">Neeche batao kitne bhejne hain aur kaunse senders se. Sirf ye file wale emails jayenge.</div></div>';
+    } else {
+      st.innerHTML='<span style="color:var(--red)">File mein koi email nahi mila. CSV mein email column check karo.</span>';
+    }
+    updateCampAvail();
+  };
+  rd.onerror=function(){ st.textContent='Could not read file.'; };
+  rd.readAsText(f);
+}
+function handleCsvUrl(){
+  var url=document.getElementById('campCsvUrl').value.trim(); if(!url)return;
+  var st=document.getElementById('campCsvStatus'); st.textContent='Fetching sheet…';
+  // fetch via backend to avoid CORS
+  apiCall('/crm/campaign/fetch-csv?url='+encodeURIComponent(url)).then(function(r){
+    if(r.rows){ _campCsvRows=r.rows;
+      st.innerHTML='<span style="color:var(--green)">✓ '+r.rows.length+' emails loaded from sheet</span>';
+      updateEstimate&&updateEstimate();
+    } else { st.textContent=r.note||'No emails found in sheet.'; }
+  }).catch(function(e){ st.textContent='Error: '+e.message; });
+}
+function updateCatLabel(){
+  var sel=document.getElementById('campCategory');
+  var custom=document.getElementById('campCategoryCustom');
+  var cat=sel.value;
+  if(cat==='__custom'){ custom.style.display='block'; cat=custom.value||'…'; }
+  else { custom.style.display='none'; }
+  var prev=document.getElementById('campCatPreview');
+  if(prev) prev.textContent='AI '+(cat||'…')+' Outreach';
+}
+function _campCategory(){
+  var sel=document.getElementById('campCategory'); if(!sel)return'';
+  if(sel.value==='__custom'){ return (document.getElementById('campCategoryCustom').value||'').trim(); }
+  return sel.value;
+}
+var _campSource='tool';   // 'tool' or 'sheet'
+function setCampSource(src){
+  _campSource=src;
+  var tc=document.getElementById('srcToolCard'), sc=document.getElementById('srcSheetCard');
+  var tr=document.getElementById('srcToolRadio'), sr=document.getElementById('srcSheetRadio');
+  var panel=document.getElementById('campSheetPanel');
+  if(src==='tool'){
+    tc.style.borderColor='var(--brand)'; sc.style.borderColor='var(--line)';
+    tr.style.borderColor='var(--brand)'; tr.innerHTML='<span style="width:8px;height:8px;border-radius:50%;background:var(--brand)"></span>';
+    sr.style.borderColor='var(--line)'; sr.innerHTML='';
+    panel.style.display='none';
+    _campCsvRows=[]; // clear any uploaded sheet
+    updateCampAvail();
+  } else {
+    sc.style.borderColor='var(--brand)'; tc.style.borderColor='var(--line)';
+    sr.style.borderColor='var(--brand)'; sr.innerHTML='<span style="width:8px;height:8px;border-radius:50%;background:var(--brand)"></span>';
+    tr.style.borderColor='var(--line)'; tr.innerHTML='';
+    panel.style.display='block';
+    updateCampAvail();
+  }
+}
+function updateCampAvail(){
+  var note=document.getElementById('campAvailNote');
+  var toolCount=document.getElementById('srcToolCount');
+  if(_campSource==='tool'){
+    apiCall('/crm/outreach/stats?mode='+dataMode()).then(function(s){
+      var n=s.pending||0;
+      if(toolCount)toolCount.textContent='('+n+' emails ready)';
+      if(note)note.textContent='— tool ke paas '+n+' emails';
+    }).catch(function(){});
+  } else {
+    var n=_campCsvRows.length;
+    if(note)note.textContent='— sheet mein '+n+' emails';
+  }
+  updateEstimate&&updateEstimate();
+}
+function checkSheet(){
+  var st=document.getElementById('campCsvStatus');
+  var fileInput=document.getElementById('campCsvFile');
+  var url=document.getElementById('campCsvUrl').value.trim();
+  if(url){
+    st.innerHTML='<span class="spin"></span> Sheet check ho rahi hai…';
+    apiCall('/crm/campaign/fetch-csv?url='+encodeURIComponent(url)).then(function(r){
+      if(r.rows && r.rows.length){
+        _campCsvRows=r.rows;
+        st.innerHTML='<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px"><b style="color:#16a34a">✓ Sheet mein '+r.rows.length+' emails mile</b><div style="font-size:12px;color:var(--muted);margin-top:4px">Neeche batao kitne bhejne hain aur kaunse senders se. Sirf ye sheet wale emails jayenge.</div></div>';
+        updateCampAvail();
+      } else {
+        st.innerHTML='<span style="color:var(--red)">'+(r.note||'Sheet mein koi email nahi mila. Publish-to-web CSV link check karo.')+'</span>';
+      }
+    }).catch(function(e){ st.innerHTML='<span style="color:var(--red)">Error: '+e.message+'</span>'; });
+  } else if(fileInput.files && fileInput.files[0]){
+    handleCsvFile({target:fileInput});
+  } else {
+    st.innerHTML='<span style="color:var(--red)">Pehle CSV file chuno ya Google Sheet link paste karo.</span>';
+  }
+}
 function createCampaignOnly(){ _createCampaign(false,false); }
 function createAndStartCampaign(scheduled){ _createCampaign(true,scheduled); }
 function _createCampaign(startNow,scheduled){
@@ -2049,10 +2360,21 @@ function _createCampaign(startNow,scheduled){
   st.style.display='block';
   if(scheduled && !schedule){showToast('Schedule time select karo','error');st.style.display='none';return;}
   st.innerHTML='<span class="spin"></span> Creating campaign...';
-  apiCall('/crm/outreach/add-from-scraper?mode='+dataMode(),'POST').then(()=>{
+  var category=_campCategory();
+  var seedList;
+  if(_campSource==='sheet'){
+    if(!_campCsvRows.length){ st.innerHTML='<span style="color:var(--red)">Pehle apni sheet check karo (kitne emails hain).</span>'; return; }
+    // ONLY the user's sheet — import those emails, don't touch tool data.
+    seedList=apiCall('/crm/outreach/add-list?mode='+dataMode(),'POST',{rows:_campCsvRows,category:category,exclusive:true});
+  } else {
+    // Tool's own scraped data.
+    seedList=apiCall('/crm/outreach/add-from-scraper?mode='+dataMode(),'POST');
+  }
+  seedList.then(()=>{
     var params='name='+encodeURIComponent(name)+'&mode='+dataMode()+'&sender_emails='+encodeURIComponent(senders)+
       '&emails_per_batch='+batch+'&delay_seconds='+minDelay+'&min_delay='+minDelay+'&max_delay='+maxDelay+'&total_target='+target+'&autopilot='+autopilot;
     if(schedule) params+='&scheduled_time='+encodeURIComponent(schedule);
+    if(category) params+='&category='+encodeURIComponent(category);
     return apiCall('/crm/campaign/create?'+params,'POST');
   }).then(r=>{
     if(r.error){st.innerHTML='<span style="color:var(--red)">\u2715</span> '+r.error;showToast(r.error,'error');return;}
@@ -2122,13 +2444,22 @@ function closeAll(){
 function openSender(id){
   const s=senders.find(x=>x.id===id); if(!s)return;
   const sid=s.realId||s.id.replace('s','');
-  // Fetch real sender data from backend
-  apiCall('/senders').then(rows=>{
+  // Fetch real sender data + real computed health together
+  Promise.all([
+    apiCall('/senders?mode='+apiMode()),
+    apiCall('/crm/warmup/health?mode='+apiMode()).catch(function(){return {senders:[]};})
+  ]).then(function(res){
+    const rows=res[0]||[]; const healthRows=(res[1]&&res[1].senders)||[];
     const real=rows.find(r=>r.id==sid)||{};
+    const hh=healthRows.find(function(h){return h.email===real.email;})||{};
     const total=real.total_sent||0, today=real.sent_today||0, cap=real.daily_cap||200;
-    const health=real.health||50, failed=real.failed||0, status=real.status||'warming';
+    // real computed health (falls back to stored only if engine had nothing)
+    const health=(hh.health!=null?hh.health:(real.health||50));
+    const failed=(hh.failed!=null?hh.failed:(real.failed||0));
+    const status=real.status||'warming';
     const warmup=real.warmup; const method=real.method||'OAuth';
-    const rr=0; // replies from backend when available
+    const rr=(hh.replies!=null?hh.replies:0);
+    const authScore=(hh.auth_score!=null?hh.auth_score:null);
     document.getElementById('drawerHead').innerHTML=
       '<div class="av" style="background:'+s.color+'">'+initials(s.name)+'</div>'+
       '<div><div class="em">'+s.email+'<small>'+s.name+' · '+method+'</small></div></div>'+
@@ -2143,8 +2474,8 @@ function openSender(id){
         '<div class="tile"><small>Daily limit</small><b>'+cap+'</b><span class="sub">max per day</span></div>'+
         '<div class="tile"><small>Health</small><b style="color:'+hColor(health)+'">'+health+'</b><span class="sub">score</span></div>'+
       '</div>'+
-      '<div class="dsec-h">Live mailbox health</div>'+
-      '<div class="card ch" style="padding:14px 16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"><div><span style="font-family:var(--disp);font-size:26px;font-weight:700;color:'+hColor(health)+'" id="dHealthNum">'+health+'</span> <span style="font-size:12px;color:var(--faint)">health score</span></div><span class="livedot"><span class="p"></span>live</span></div><svg class="livechart" id="dHealthChart" style="height:120px"></svg></div>'+
+      '<div class="dsec-h">Reputation trend (real data)</div>'+
+      '<div class="card ch" style="padding:14px 16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div><span style="font-family:var(--disp);font-size:26px;font-weight:700;color:'+hColor(health)+'">'+health+'</span> <span style="font-size:12px;color:var(--faint)">health score</span></div><span class="livedot"><span class="p"></span>live</span></div><div id="dHealthTrend" style="min-height:150px"></div></div>'+
       '<div class="dsec-h">Warmup settings</div>'+
       '<div class="card ch" style="padding:14px 16px">'+
         '<div style="display:flex;align-items:center;justify-content:space-between">'+
@@ -2160,11 +2491,15 @@ function openSender(id){
         '<button class="btn sm" onclick="deleteSender(\''+sid+'\');closeAll()" style="color:#f04438">Delete sender</button>'+
       '</div>';
     openDrawer();
-    const chart=LiveChart(document.getElementById('dHealthChart'),{W:560,H:120,N:40,color:hColor(health)==='var(--green)'?'#12B76A':hColor(health)==='var(--amber)'?'#F79009':'#F04438',base:health*0.7,amp:16});
-    if(!reducedMotion){
-      let hv=health;
-      drawerTimers.push(setInterval(()=>{hv=Math.max(30,Math.min(99,hv+(Math.random()*2-1)*0.5));chart.push(hv*0.7+Math.random()*12);const n=document.getElementById('dHealthNum');if(n)n.textContent=Math.round(hv);},1500));
-    }
+    // Real 30-day reputation trend from recorded history (no random data).
+    apiCall('/crm/warmup/history?email='+encodeURIComponent(real.email)+'&days=30').then(function(r){
+      var hist=(r&&r.history)||[];
+      _lineChart(document.getElementById('dHealthTrend'), [
+        {label:'Health', color:'#16a34a', points:hist.map(function(p){return {x:p.day,y:p.health};})},
+        {label:'Bounce %', color:'#dc2626', points:hist.map(function(p){return {x:p.day,y:p.bounce_rate};})},
+        {label:'Reply %', color:'#2B4BF2', points:hist.map(function(p){return {x:p.day,y:p.reply_rate};})}
+      ], {max:100});
+    }).catch(function(){});
   }).catch(()=>{});
 }
 
@@ -2322,7 +2657,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAll();});
 
 // ---------- NAV ----------
 
-const titles={overview:['Overview','Domain: acme-outreach.com · synced 2m ago'],senders:['Senders','Gmail accounts connected'],warmup:['Warmup','Reputation engine · running live'],campaigns:['Campaigns','Click any campaign for its sending log'],prospecting:['Email Scraper','Extract public business emails from domains'],templates:['Templates','4 active variants · spintax on'],analytics:['Analytics','Complete performance overview · live'],blogresearch:['Blog Research','Find clients via external links from blog articles'],deals:['Deals','Live negotiations — filled in from your replies']};
+const titles={overview:['Overview','Domain: acme-outreach.com · synced 2m ago'],autopilot:['Autopilot','Hands-free: scrape → campaign → send → follow-up'],senders:['Senders','Gmail accounts connected'],warmup:['Warmup','Reputation engine · running live'],campaigns:['Campaigns','Click any campaign for its sending log'],prospecting:['Email Scraper','Extract public business emails from domains'],templates:['Templates','4 active variants · spintax on'],analytics:['Analytics','Complete performance overview · live'],blogresearch:['Blog Research','Find clients via external links from blog articles'],seofinder:['SEO Agency Finder','Discover SEO & marketing agencies by keyword + location'],deals:['Deals','Live negotiations — filled in from your replies']};
 document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>{
   const v=n.dataset.view;
   if(!v) return;   // "Back to menu" is styled as a nav but opens the home page
@@ -2336,6 +2671,8 @@ document.querySelectorAll('.nav').forEach(n=>n.addEventListener('click',()=>{
   if(v==='senders' || v==='warmup') loadRealSenders();
   if(v==='senders') loadSenderLog();
   if(v==='warmup') loadRealWarmup();
+  if(v==='autopilot') loadAutopilot();
+  if(v==='seofinder') loadSeoFinder();
   if(v==='campaigns') renderCampaigns();
   if(v==='templates') loadTemplates();
   if(v==='analytics') loadAnalytics();
@@ -2529,7 +2866,8 @@ function applyMode(m){
   try{ localStorage.setItem('ww_mode', m); }catch(e){}
   const vendor = m==='vendor';
   const isBlog = m==='blog';
-  const label = isBlog?'Blog Research':(vendor?'Vendor':'Client');
+  const isSeo = m==='seo';
+  const label = isSeo?'SEO Finder':(isBlog?'Blog Research':(vendor?'Vendor':'Client'));
   try{document.querySelector('.brand small').textContent=label;}catch(e){}
   const badge=document.getElementById('modeBadge');
   if(badge){ badge.textContent=label; badge.className='mode-badge '+(vendor?'mv':'mc'); }
@@ -2576,6 +2914,21 @@ function applyMode(m){
   } else {
     if(blogNav) blogNav.style.display='none';
     if(scrNav) scrNav.style.display='flex';
+  }
+  // SEO Finder mode: show the SEO nav, hide the raw scraper (SEO finds+scrapes
+  // itself), and open the SEO tab by default.
+  var seoNav=document.getElementById('navSeoFinder');
+  if(isSeo){
+    if(seoNav) seoNav.style.display='flex';
+    if(scrNav) scrNav.style.display='none';
+    titles.overview=['Overview','SEO Agency Finder workspace · live'];
+    reloadForMode();
+    if(!_isRestoring){
+      setTimeout(function(){ var sn=document.getElementById('navSeoFinder'); if(sn) sn.click(); },50);
+    }
+    return;
+  } else {
+    if(seoNav) seoNav.style.display='none';
   }
   if(isBlog){
     // Blog mode uses CLIENT templates/senders under the hood (client-hunting).
@@ -2627,7 +2980,34 @@ function applyMode(m){
 // ===== FOLLOW-UPS (Overview card) =====
 // Anyone who hasn't replied after the wait gets a short nudge, sent a few per
 // sender per hour so no single mailbox bursts.
+var _fuEnabled = true;
+function renderFuToggle(){
+  var sw=document.getElementById('fuToggleSwitch');
+  var kb=document.getElementById('fuToggleKnob');
+  var lb=document.getElementById('fuToggleLabel');
+  if(!sw||!kb) return;
+  if(_fuEnabled){
+    sw.style.background='#16a34a'; kb.style.left='20px';
+    if(lb){lb.textContent='Follow-ups ON'; lb.style.color='#16a34a';}
+  } else {
+    sw.style.background='#cbd5e1'; kb.style.left='2px';
+    if(lb){lb.textContent='Follow-ups OFF'; lb.style.color='var(--faint)';}
+  }
+}
+function loadFuToggle(){
+  apiCall('/crm/followups/toggle?mode='+dataMode()).then(function(r){
+    _fuEnabled = !!r.enabled; renderFuToggle();
+  }).catch(function(){});
+}
+function toggleFollowups(){
+  var next = !_fuEnabled;
+  _fuEnabled = next; renderFuToggle();   // optimistic
+  apiCall('/crm/followups/toggle?mode='+dataMode()+'&enabled='+(next?'true':'false'),'POST')
+    .then(function(r){ _fuEnabled=!!r.enabled; renderFuToggle(); })
+    .catch(function(){ _fuEnabled=!next; renderFuToggle(); });
+}
 function loadFollowups(){
+  loadFuToggle();
   apiCall('/crm/followups/stats?mode='+dataMode()).then(function(f){
     var box=document.getElementById('fuCards');
     if(!box) return;
@@ -3278,8 +3658,20 @@ function scrControl(action){
   pollScraper();
 }
 function scrExport(fmt){
-  if(!scrJobId)return;
-  window.open(API_BASE+'/crm/scraper/jobs/'+scrJobId+'/export?format='+fmt+'&mode='+apiMode(),'_blank');
+  if(scrJobId){
+    window.open(API_BASE+'/crm/scraper/jobs/'+scrJobId+'/export?format='+fmt+'&mode='+apiMode(),'_blank');
+    return;
+  }
+  // No job attached (e.g. after a refresh) — grab the most recent job for this
+  // dashboard and download that, so the button always does something.
+  apiCall('/crm/scraper/jobs?mode='+apiMode()).then(function(r){
+    var jobs=Array.isArray(r)?r:((r&&r.jobs)||[]);
+    var withEmails=jobs.filter(function(j){return (j.emails_found||0)>0;});
+    var pick=(withEmails[0]||jobs[0]);
+    if(!pick){ showToast('Koi scraped job nahi mila download ke liye.','error'); return; }
+    var jid=pick.id||pick.job_id;
+    window.open(API_BASE+'/crm/scraper/jobs/'+jid+'/export?format='+fmt+'&mode='+apiMode(),'_blank');
+  }).catch(function(e){ showToast('Download error: '+e.message,'error'); });
 }
 function splitIntoBatches(){
   if(!scrJobId){document.getElementById('scrStatus').textContent='No active job to split.';return;}
@@ -3319,7 +3711,8 @@ function loadPrevJobs(){
         '<div><span class="pill '+(j.status==='completed'?'g':j.status==='stopped'?'a':'b')+'">'+j.status+'</span></div>'+
         '<div style="display:flex;gap:6px">'+(canResume?'<button class="btn sm" onclick="resumePrevJob('+j.id+')">Resume</button>':'')+
         '<button class="btn sm" onclick="viewPrevJob('+j.id+')">View</button>'+
-        '<button class="btn sm" onclick="scrExportJob('+j.id+',\'csv\')">CSV</button></div></div>';
+        '<button class="btn sm" onclick="scrExportJob('+j.id+',\'csv\')">CSV</button>'+
+        '<button class="btn sm" onclick="scrExportJob('+j.id+',\'xlsx\')">Excel</button></div></div>';
     }).join('')||'<div style="padding:14px;color:var(--faint)">No previous jobs.</div>';
   }).catch(()=>{});
 }
@@ -3827,11 +4220,31 @@ function showToast(msg, type){
   setTimeout(()=>t.classList.remove('on'), 3500);
 }
 
+var _healthCache={};   // email -> last known real health, survives re-renders
 function loadRealSenders(){
   apiCall('/senders?mode='+apiMode()).then(rows=>{
-    senders=rows.map((s,i)=>({id:'s'+s.id,realId:s.id,email:s.email,name:s.name||s.email.split('@')[0],color:palette[i%palette.length],health:s.health||50,state:s.status||'warming',conn:s.method||'OAuth',cap:s.daily_cap||200,today:s.sent_today||0,total:s.total_sent||0,replies:0,failed:s.failed||0,opened:0,warmup:s.warmup,spf:1,dkim:1,dmarc:1,age:0}));
+    senders=rows.map((s,i)=>{
+      var cached=_healthCache[s.email]||{};
+      return {id:'s'+s.id,realId:s.id,email:s.email,name:s.name||s.email.split('@')[0],color:palette[i%palette.length],
+        // reuse cached real health so a background refresh never blinks to "…"
+        health:(cached.health!=null?cached.health:null),_rawHealth:s.health,
+        level:cached.level||'',bounce_rate:cached.bounce_rate,reply_rate:cached.reply_rate,auth_score:cached.auth_score,
+        state:s.status||'warming',conn:s.method||'OAuth',cap:s.daily_cap||200,today:s.sent_today||0,total:s.total_sent||0,replies:0,failed:s.failed||0,opened:0,warmup:s.warmup,spf:1,dkim:1,dmarc:1,age:0};
+    });
     renderSenders();
     renderWarmCards();
+    apiCall('/crm/warmup/health?mode='+apiMode()).then(function(r){
+      var byEmail={};
+      (r&&r.senders||[]).forEach(function(h){ byEmail[h.email]=h; });
+      senders.forEach(function(s){
+        var h=byEmail[s.email];
+        if(h){
+          s.health=h.health; s.level=h.level; s.bounce_rate=h.bounce_rate; s.reply_rate=h.reply_rate; s.auth_score=h.auth_score;
+          _healthCache[s.email]={health:h.health,level:h.level,bounce_rate:h.bounce_rate,reply_rate:h.reply_rate,auth_score:h.auth_score};
+        } else if(s.health==null){ s.health=s._rawHealth!=null?s._rawHealth:50; }
+      });
+      renderSenders();
+    }).catch(function(){});
   }).catch(()=>{});
 }
 
@@ -3930,6 +4343,222 @@ function submitSender(){
 
 // ===== REAL WARMUP =====
 function loadRealWarmup(){
+  loadDeliverabilityCenter();
+}
+function loadDeliverabilityCenter(){
+  // Status line: engine running state + pool health (light call)
+  apiCall('/crm/warmup/engine-status?mode='+apiMode()).then(d=>{
+    var st=document.getElementById('warmupStatus');
+    if(st){
+      var pool='';
+      if(d.pool_domains<2) pool=' · <span style="color:var(--red)">Pool needs 2+ domains ('+d.pool_domains+' now)</span>';
+      else pool=' · <span style="color:var(--green)">Pool: '+d.pool_size+' senders / '+d.pool_domains+' domains</span>';
+      st.innerHTML=(d.running?'<span style="color:var(--green)">● Warmup running</span> — every 90 min':'<span style="color:var(--faint)">○ Warmup stopped</span> — click Start warmup')+pool;
+    }
+  }).catch(()=>{});
+  // Rich health + auth for each sender (the main call)
+  var el=document.getElementById('dcRows'), sm=document.getElementById('dcSummary');
+  if(!el) return;
+  apiCall('/crm/warmup/health').then(function(r){
+    var rows=(r&&r.senders)||[];
+    if(sm && r.summary){
+      var s=r.summary;
+      function card(lbl,val,col,sub){ return '<div style="background:var(--panel-2);border-radius:14px;padding:16px">'+
+        '<div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em">'+lbl+'</div>'+
+        '<div style="font-size:28px;font-weight:800;color:'+(col||'var(--ink)')+';margin-top:3px;line-height:1">'+val+'</div>'+
+        (sub?'<div style="font-size:11px;color:var(--faint);margin-top:3px">'+sub+'</div>':'')+'</div>'; }
+      sm.innerHTML=card('Senders',s.count,null,(s.running?'warmup on':'warmup off'))+
+        card('Avg health',s.avg_health,_healthColor(s.avg_health),s.avg_health>=70?'looking good':'needs work')+
+        card('Healthy',s.healthy+'/'+s.count,'#16a34a','score ≥ 70')+
+        card('At risk',s.at_risk,s.at_risk>0?'#dc2626':'#16a34a',s.at_risk>0?'need attention':'all clear')+
+        card('Warmed today',s.warm_today,'#2B4BF2','emails');
+    }
+    if(!rows.length){ el.innerHTML='<div style="color:var(--faint);font-size:13px;padding:8px">'+((r&&r.note)||'No senders yet. Add senders first.')+'</div>'; return; }
+    _healthData={};
+    var html='';
+    rows.forEach(function(s,idx){
+      _healthData[idx]=s;
+      var rc=s.risk==='high'?'#dc2626':s.risk==='medium'?'#d97706':'#16a34a';
+      var wtarget=20, wpct=Math.min(100,Math.round((s.warmup_sent_today/wtarget)*100));
+      html+='<div style="border:1px solid var(--line);border-radius:14px;margin-bottom:12px;overflow:hidden;transition:box-shadow .2s,border-color .2s" onmouseover="this.style.boxShadow=\'0 4px 18px rgba(0,0,0,.07)\';this.style.borderColor=\'#cbd5e1\'" onmouseout="this.style.boxShadow=\'none\';this.style.borderColor=\'var(--line)\'">';
+      // COMPACT HEADER
+      html+='<div onclick="toggleHealthRow('+idx+')" style="display:flex;gap:16px;align-items:center;padding:16px;cursor:pointer;user-select:none">';
+      html+=_healthRing(s.health,54);
+      html+='<div style="flex:1;min-width:0">';
+      html+='<div style="display:flex;align-items:center;gap:8px"><span style="font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+s.email+'</span>';
+      html+='<span style="font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;background:'+rc+'18;color:'+rc+';flex-shrink:0">'+s.level.toUpperCase()+'</span></div>';
+      // warmup progress bar
+      html+='<div style="display:flex;align-items:center;gap:8px;margin-top:8px">';
+      html+='<div style="flex:1;height:6px;background:var(--line);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+wpct+'%;background:linear-gradient(90deg,#22c55e,#16a34a);transition:width .6s"></div></div>';
+      html+='<span style="font-size:11px;color:var(--faint);flex-shrink:0">'+s.warmup_sent_today+'/'+wtarget+' today</span></div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin-top:5px">'+s.bounce_rate+'% bounce · '+s.reply_rate+'% reply · '+s.total_sent+' sent'+(s.auth_score!=null?(' · auth '+s.auth_score):'')+'</div>';
+      html+='</div>';
+      html+='<svg id="hchev_'+idx+'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2.5" style="flex-shrink:0;transition:transform .25s"><path d="M9 18l6-6-6-6"/></svg>';
+      html+='</div>';
+      // EXPANDABLE
+      html+='<div id="hd_'+idx+'" style="max-height:0;overflow:hidden;transition:max-height .4s cubic-bezier(.4,0,.2,1)"><div style="padding:0 16px 16px">';
+      html+='<div style="font-size:13px;color:var(--muted);background:var(--panel-2);padding:10px 14px;border-radius:10px;margin-bottom:14px;border-left:3px solid '+rc+'">💡 '+s.recommendation+'</div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Reputation trend (30 days)</div>';
+      html+='<div id="htrend_'+idx+'" style="margin-bottom:16px"></div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Score breakdown</div>';
+      html+='<div id="hspark_'+idx+'" style="margin-bottom:14px"></div>';
+      html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px">';
+      [['Warmup day',s.warmup_day],['Total sent',s.total_sent],['Today',s.warmup_sent_today],['Replies',s.replies],['Failed',s.failed],['Auth',s.auth_score!=null?s.auth_score:'—']].forEach(function(p){
+        html+='<div style="background:var(--panel-2);border-radius:10px;padding:10px"><div style="color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.03em">'+p[0]+'</div><div style="font-weight:800;font-size:16px;margin-top:2px">'+p[1]+'</div></div>';
+      });
+      html+='</div>';
+      if(s.risks && s.risks.length){
+        s.risks.forEach(function(rk){ html+='<div style="font-size:12px;color:#b91c1c;background:#fef2f2;border-radius:10px;padding:9px 12px;margin-top:8px">⚠ '+rk+'</div>'; });
+      }
+      html+='</div></div></div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(e){ el.innerHTML='<div style="color:var(--red);font-size:13px;padding:8px">Error: '+e.message+'</div>'; });
+}
+function loadDeliverabilityCenter(){
+  var wmode=dataMode();  // vendor/client/blog — senders are mode-scoped
+  apiCall('/crm/warmup/engine-status?mode='+apiMode()).then(d=>{
+    var st=document.getElementById('warmupStatus');
+    if(st){
+      var pool='';
+      if(d.pool_domains<2) pool=' · <span style="color:var(--red)">Pool needs 2+ domains ('+d.pool_domains+' now)</span>';
+      else pool=' · <span style="color:var(--green)">Pool: '+d.pool_size+' senders / '+d.pool_domains+' domains</span>';
+      st.innerHTML=(d.running?'<span style="color:var(--green)">● Warmup running</span> — every 90 min':'<span style="color:var(--faint)">○ Warmup stopped</span> — click Start warmup')+pool;
+    }
+  }).catch(()=>{});
+  // Fleet trend chart (top)
+  apiCall('/crm/warmup/fleet-trend?mode='+wmode+'&days=30').then(function(r){
+    var hist=(r&&r.history)||[];
+    _lineChart(document.getElementById('fleetChart'), [
+      {label:'Avg health', color:'#16a34a', points:hist.map(function(p){return {x:p.day,y:p.health};})},
+      {label:'Avg bounce %', color:'#dc2626', points:hist.map(function(p){return {x:p.day,y:p.bounce_rate};})},
+      {label:'Avg reply %', color:'#2B4BF2', points:hist.map(function(p){return {x:p.day,y:p.reply_rate};})}
+    ], {max:100});
+  }).catch(function(){});
+  // Per-sender rows
+  var el=document.getElementById('dcRows'), sm=document.getElementById('dcSummary');
+  if(!el) return;
+  apiCall('/crm/warmup/health?mode='+wmode).then(function(r){
+    var rows=(r&&r.senders)||[];
+    if(sm && r.summary){
+      var s=r.summary;
+      function card(lbl,val,col,sub){ return '<div style="background:var(--panel-2);border-radius:14px;padding:16px"><div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em">'+lbl+'</div><div style="font-size:26px;font-weight:800;color:'+(col||'var(--ink)')+';margin-top:3px;line-height:1">'+val+'</div>'+(sub?'<div style="font-size:11px;color:var(--faint);margin-top:3px">'+sub+'</div>':'')+'</div>'; }
+      sm.innerHTML=card('Senders',s.count,null,(s.running?'warmup on':'warmup off'))+
+        card('Avg health',s.avg_health,_healthColor(s.avg_health))+
+        card('Healthy',s.healthy+'/'+s.count,'#16a34a')+
+        card('At risk',s.at_risk,s.at_risk>0?'#dc2626':'#16a34a')+
+        card('Warmed today',s.warm_today,'#2B4BF2');
+    }
+    if(!rows.length){ el.innerHTML='<div style="color:var(--faint);font-size:13px;padding:8px">No senders in this dashboard yet. Add senders first.</div>'; return; }
+    _healthData={};
+    var html='';
+    rows.forEach(function(s,idx){
+      _healthData[idx]=s;
+      var rc=s.risk==='high'?'#dc2626':s.risk==='medium'?'#d97706':'#16a34a';
+      var wtarget=20, wpct=Math.min(100,Math.round((s.warmup_sent_today/wtarget)*100));
+      var on=(s.warmup_on!==false);  // real per-sender warmup flag
+      html+='<div style="border:1px solid var(--line);border-radius:14px;margin-bottom:12px;overflow:hidden;transition:box-shadow .2s,border-color .2s" onmouseover="this.style.boxShadow=\'0 4px 18px rgba(0,0,0,.07)\'" onmouseout="this.style.boxShadow=\'none\'">';
+      // ROW: ring | email+ring | 3 mini graphs | toggle | chevron
+      html+='<div style="display:flex;gap:14px;align-items:center;padding:14px">';
+      html+='<div onclick="toggleHealthRow('+idx+')" style="cursor:pointer;flex-shrink:0">'+_healthRing(s.health,48)+'</div>';
+      // email + provider
+      html+='<div onclick="toggleHealthRow('+idx+')" style="cursor:pointer;min-width:150px;flex-shrink:0">';
+      html+='<div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px">'+s.email+'</div>';
+      html+='<div style="font-size:10px;color:var(--faint);margin-top:2px">'+s.provider+' · <span style="color:'+rc+';font-weight:700">'+s.level+'</span></div>';
+      html+='</div>';
+      // 3 mini sparkline graphs
+      html+='<div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:12px;min-width:0">';
+      html+='<div style="text-align:center"><div style="font-size:9px;color:var(--faint);margin-bottom:2px">HEALTH</div><div id="msp_h_'+idx+'" style="height:44px"></div></div>';
+      html+='<div style="text-align:center"><div style="font-size:9px;color:var(--faint);margin-bottom:2px">REPLY · BOUNCE %</div><div id="msp_r_'+idx+'" style="height:44px"></div></div>';
+      html+='<div style="text-align:center"><div style="font-size:9px;color:var(--faint);margin-bottom:2px">AUTH SCORE</div><div id="msp_a_'+idx+'" style="height:44px"></div></div>';
+      html+='</div>';
+      // warmup toggle
+      html+='<div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:3px">';
+      html+='<span id="wt_'+idx+'" onclick="toggleWarmupSender(\''+s.email.replace(/'/g,"")+'\','+idx+')" style="cursor:pointer;position:relative;display:inline-block;width:40px;height:22px;background:'+(on?'#16a34a':'#cbd5e1')+';border-radius:22px;transition:background .2s">'+
+            '<span style="position:absolute;top:2px;left:'+(on?'20px':'2px')+';width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)"></span></span>';
+      html+='<span style="font-size:9px;color:var(--faint)">warmup</span></div>';
+      // chevron
+      html+='<svg id="hchev_'+idx+'" onclick="toggleHealthRow('+idx+')" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2.5" style="flex-shrink:0;cursor:pointer;transition:transform .25s"><path d="M9 18l6-6-6-6"/></svg>';
+      html+='</div>';
+      // EXPANDABLE — live data
+      html+='<div id="hd_'+idx+'" style="max-height:0;overflow:hidden;transition:max-height .4s cubic-bezier(.4,0,.2,1)"><div style="padding:0 16px 16px">';
+      html+='<div style="font-size:13px;color:var(--muted);background:var(--panel-2);padding:10px 14px;border-radius:10px;margin-bottom:14px;border-left:3px solid '+rc+'">💡 '+s.recommendation+'</div>';
+      html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px">';
+      [['Emails sent',s.total_sent],['Replies',s.replies],['Bounced',s.failed],['Sent today',s.warmup_sent_today],['Health',s.health+'%'],['Auth',s.auth_score!=null?s.auth_score:'—']].forEach(function(p){
+        html+='<div style="background:var(--panel-2);border-radius:10px;padding:10px"><div style="color:var(--faint);font-size:10px;text-transform:uppercase">'+p[0]+'</div><div style="font-weight:800;font-size:17px;margin-top:2px">'+p[1]+'</div></div>';
+      });
+      html+='</div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin:14px 0 8px;text-transform:uppercase;letter-spacing:.05em">Reputation trend (30 days)</div>';
+      html+='<div id="htrend_'+idx+'"></div>';
+      if(s.risks && s.risks.length){ s.risks.forEach(function(rk){ html+='<div style="font-size:12px;color:#b91c1c;background:#fef2f2;border-radius:10px;padding:9px 12px;margin-top:8px">⚠ '+rk+'</div>'; }); }
+      html+='</div></div></div>';
+    });
+    el.innerHTML=html;
+    // draw the 3 mini sparklines per row (single-point shows a bar)
+    rows.forEach(function(s,idx){ _miniSpark(idx, s); });
+  }).catch(function(e){ el.innerHTML='<div style="color:var(--red);font-size:13px;padding:8px">Error: '+e.message+'</div>'; });
+}
+function _metricRing(value, max, color, label, size){
+  size=size||36;
+  var pct=Math.max(0,Math.min(1,value/max));
+  var r=(size-8)/2, cx=size/2, circ=2*Math.PI*r, off=circ*(1-pct);
+  var fs=size>=44?13:11;
+  return '<div style="display:flex;flex-direction:column;align-items:center;gap:2px">'+
+    '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'">'+
+    '<circle cx="'+cx+'" cy="'+cx+'" r="'+r+'" fill="none" stroke="var(--line)" stroke-width="4"/>'+
+    '<circle cx="'+cx+'" cy="'+cx+'" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="4" stroke-linecap="round" '+
+    'stroke-dasharray="'+circ+'" stroke-dashoffset="'+off+'" transform="rotate(-90 '+cx+' '+cx+')" style="transition:stroke-dashoffset .6s"/>'+
+    '<text x="'+cx+'" y="'+(cx+fs/3)+'" text-anchor="middle" font-size="'+fs+'" font-weight="800" fill="'+color+'">'+label+'</text></svg></div>';
+}
+function _miniSpark(idx, s){
+  // All three columns show a RING, colours shift live with the value.
+  var hh=document.getElementById('msp_h_'+idx);
+  if(hh) hh.innerHTML='<div style="display:flex;justify-content:center">'+_healthRing(s.health,40)+'</div>';
+  // Reply/Bounce: a ring for reply rate (green good), with bounce shown small.
+  var rr=document.getElementById('msp_r_'+idx);
+  if(rr){
+    var rc=(s.bounce_rate>5)?'#dc2626':(s.reply_rate>=2?'#16a34a':'#d97706');
+    // scale reply rate to 0..10% for the ring fill
+    rr.innerHTML='<div style="display:flex;justify-content:center;align-items:center;gap:6px">'+
+      _metricRing(s.reply_rate, 10, '#2B4BF2', (s.reply_rate||0)+'', 40)+
+      _metricRing(s.bounce_rate, 10, (s.bounce_rate>5?'#dc2626':'#16a34a'), (s.bounce_rate||0)+'', 40)+'</div>';
+  }
+  // Auth score ring
+  var aa=document.getElementById('msp_a_'+idx);
+  if(aa){
+    var ac=(s.auth_score>=90?'#16a34a':s.auth_score>=60?'#d97706':'#dc2626');
+    aa.innerHTML='<div style="display:flex;justify-content:center">'+
+      _metricRing(s.auth_score||0, 100, ac, (s.auth_score!=null?s.auth_score:'—')+'', 40)+'</div>';
+  }
+}
+function _miniLine(hostId, vals, color, max, current, vals2, color2){
+  var host=document.getElementById(hostId); if(!host) return;
+  var w=host.clientWidth||120, h=36;
+  function draw(vs,c){
+    if(!vs||vs.length<2){
+      // not enough history — show current value as a small bar + number
+      var v=(current!=null?current:(vs&&vs[0])||0);
+      return '<rect x="2" y="'+(h-Math.max(3,(v/max)*(h-6))-2)+'" width="8" height="'+Math.max(3,(v/max)*(h-6))+'" rx="2" fill="'+c+'"/>';
+    }
+    var pts=vs.map(function(v,i){ var x=2+(i/(vs.length-1))*(w-4); var y=h-2-((v/max)*(h-6)); return x+','+y; });
+    return '<path d="M'+pts.join(' L')+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+  }
+  var svg='<svg width="100%" height="'+h+'" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">';
+  svg+=draw(vals,color);
+  if(vals2) svg+=draw(vals2,color2);
+  svg+='</svg>';
+  // tiny current value label
+  var lbl=(current!=null?current:'—');
+  host.innerHTML='<div style="display:flex;align-items:center;gap:6px"><div style="flex:1">'+svg+'</div><span style="font-size:12px;font-weight:800;color:'+color+'">'+lbl+'</span></div>';
+}
+function toggleWarmupSender(email, idx){
+  var t=document.getElementById('wt_'+idx); if(!t) return;
+  var knob=t.querySelector('span'), isOn=(t.style.background.indexOf('22, 163')>=0 || t.style.background==='rgb(22, 163, 74)' || t.style.background==='#16a34a');
+  var next=!isOn;
+  t.style.background=next?'#16a34a':'#cbd5e1'; if(knob)knob.style.left=next?'20px':'2px';
+  apiCall('/crm/senders/warmup-toggle?email='+encodeURIComponent(email)+'&enabled='+(next?'true':'false'),'POST').catch(function(){});
+}
+function _oldLoadRealWarmup(){
   apiCall('/crm/warmup/engine-status?mode='+apiMode()).then(d=>{
     var st=document.getElementById('warmupStatus');
     if(st){
@@ -3965,6 +4594,332 @@ function loadRealWarmup(){
     var st=document.getElementById('warmupStatus');
     if(st) st.textContent='Could not load warmup status.';
   });
+}
+function _delivColor(status){
+  return status==='pass'?'#16a34a':status==='warning'?'#d97706':status==='fail'?'#dc2626':'#94a3b8';
+}
+function _delivBadge(status){
+  var c=_delivColor(status);
+  var txt=status==='pass'?'PASS':status==='warning'?'WARNING':status==='fail'?'FAILED':'—';
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;'+
+    'background:'+c+'22;color:'+c+'">'+txt+'</span>';
+}
+function loadDeliverability(){
+  var el=document.getElementById('delivPanel');
+  if(!el) return;
+  el.innerHTML='<div style="color:var(--faint);font-size:13px"><span class="spin"></span> Checking DNS records for each sender domain…</div>';
+  apiCall('/crm/deliverability/senders?mode='+dataMode()).then(function(r){
+    var doms=(r&&r.domains)||[];
+    if(!doms.length){ el.innerHTML='<div style="color:var(--faint);font-size:13px">'+((r&&r.note)||'No sender domains found.')+'</div>'; return; }
+    var html='';
+    doms.forEach(function(d){
+      var oc=d.score>=90?'#16a34a':d.score>=60?'#d97706':'#dc2626';
+      html+='<div style="border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:10px">';
+      html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
+      html+='<div><span style="font-weight:700;font-size:14px">'+d.domain+'</span>'+
+            '<span style="font-size:11px;color:var(--faint);margin-left:8px">'+((d.senders||[]).length)+' sender(s)</span></div>';
+      html+='<div style="text-align:right"><span style="font-size:22px;font-weight:800;color:'+oc+'">'+(d.score!=null?d.score:'?')+'</span>'+
+            '<span style="font-size:11px;color:var(--faint)">/100 · '+(d.overall||'')+'</span></div>';
+      html+='</div>';
+      ['spf','dkim','dmarc','mx'].forEach(function(k){
+        if(!d[k]) return;
+        html+='<div style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">';
+        html+='<div style="width:56px;font-weight:700;font-size:12px;color:var(--muted)">'+k.toUpperCase()+'</div>';
+        html+='<div style="width:74px">'+_delivBadge(d[k].status)+'</div>';
+        html+='<div style="flex:1;font-size:12px;color:var(--muted)">'+d[k].detail+
+              (d[k].record?('<div style="font-size:11px;color:var(--faint);margin-top:2px;word-break:break-all">'+d[k].record+'</div>'):'')+'</div>';
+        html+='</div>';
+      });
+      html+='</div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(e){ el.innerHTML='<div style="color:var(--red);font-size:13px">Error: '+e.message+'</div>'; });
+}
+function _healthColor(score){
+  // green = healthy, amber = warming/ok, red = poor. Shifts live as score moves.
+  return score>=70?'#16a34a':score>=55?'#22c55e':score>=40?'#d97706':'#dc2626';
+}
+function _healthRing(score,size){
+  size=size||44;
+  if(score==null){ // pending — muted placeholder, no misleading number
+    var r0=(size-10)/2;
+    return '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" style="flex-shrink:0">'+
+      '<circle cx="'+(size/2)+'" cy="'+(size/2)+'" r="'+r0+'" fill="none" stroke="var(--line)" stroke-width="4"/>'+
+      '<text x="'+(size/2)+'" y="'+(size/2+4)+'" text-anchor="middle" font-size="11" fill="var(--faint)">…</text></svg>';
+  }
+  var r=(size-10)/2, cx=size/2, c=_healthColor(score), circ=2*Math.PI*r, off=circ*(1-score/100);
+  var fs=size>=54?17:size>=44?14:12;
+  return '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" style="flex-shrink:0">'+
+    '<circle cx="'+cx+'" cy="'+cx+'" r="'+r+'" fill="none" stroke="var(--line)" stroke-width="4"/>'+
+    '<circle cx="'+cx+'" cy="'+cx+'" r="'+r+'" fill="none" stroke="'+c+'" stroke-width="4" stroke-linecap="round" '+
+    'stroke-dasharray="'+circ+'" stroke-dashoffset="'+off+'" transform="rotate(-90 '+cx+' '+cx+')" style="transition:stroke-dashoffset .7s cubic-bezier(.4,0,.2,1)"/>'+
+    '<text x="'+cx+'" y="'+(cx+fs/3)+'" text-anchor="middle" font-size="'+fs+'" font-weight="800" fill="'+c+'">'+score+'</text></svg>';
+}
+var _healthData={};
+function toggleHealthRow(id){
+  var d=document.getElementById('hd_'+id), chev=document.getElementById('hchev_'+id);
+  if(!d) return;
+  var open=d.style.maxHeight && d.style.maxHeight!=='0px';
+  if(open){ d.style.maxHeight='0px'; if(chev)chev.style.transform='rotate(0deg)'; }
+  else { d.style.maxHeight=d.scrollHeight+'px'; if(chev)chev.style.transform='rotate(90deg)';
+         if(_healthData[id]){ _drawSpark(id, _healthData[id]); loadSenderTrend(id, _healthData[id].email); } }
+}
+function _lineChart(host, series, opts){
+  // series: [{label, color, points:[{x:'day', y:number}]}], opts:{max, unit}
+  if(!host) return;
+  var w=host.clientWidth||520, h=170, padL=34, padB=26, padT=12, padR=12;
+  var iw=w-padL-padR, ih=h-padT-padB;
+  var allDays=[]; series.forEach(function(s){ s.points.forEach(function(p){ if(allDays.indexOf(p.x)<0)allDays.push(p.x); }); });
+  if(allDays.length<2){
+    host.innerHTML='<div style="padding:24px;text-align:center;color:var(--faint);font-size:12px;background:var(--panel-2);border-radius:10px">📈 Trend banega jab kuch din ka data jama hoga.<br>Abhi '+allDays.length+' din ka snapshot hai — kal se line barhegi.</div>';
+    return;
+  }
+  var max=opts.max||Math.max.apply(null,[1].concat(series.flatMap(function(s){return s.points.map(function(p){return p.y;});})));
+  max=Math.ceil(max/10)*10||100;
+  function X(i){ return padL + (allDays.length<=1?iw/2:(i/(allDays.length-1))*iw); }
+  function Y(v){ return padT + ih - (v/max)*ih; }
+  var svg='<svg width="100%" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="overflow:visible">';
+  // gridlines
+  for(var g=0;g<=4;g++){ var gy=padT+ih-(g/4)*ih, gv=Math.round(max*g/4);
+    svg+='<line x1="'+padL+'" y1="'+gy+'" x2="'+(w-padR)+'" y2="'+gy+'" stroke="var(--line)" stroke-width="1" stroke-dasharray="3 3"/>';
+    svg+='<text x="'+(padL-6)+'" y="'+(gy+3)+'" text-anchor="end" font-size="9" fill="var(--faint)">'+gv+'</text>';
+  }
+  // x labels (first, mid, last)
+  [0, Math.floor((allDays.length-1)/2), allDays.length-1].forEach(function(i){
+    var lbl=allDays[i]?allDays[i].slice(5):''; // MM-DD
+    svg+='<text x="'+X(i)+'" y="'+(h-8)+'" text-anchor="middle" font-size="9" fill="var(--faint)">'+lbl+'</text>';
+  });
+  series.forEach(function(s){
+    var pts=s.points.map(function(p){ var i=allDays.indexOf(p.x); return X(i)+','+Y(p.y); });
+    if(!pts.length) return;
+    // area fill
+    var area='M'+X(0)+','+Y(0)+' L'+pts.join(' L')+' L'+X(allDays.length-1)+','+Y(0)+' Z';
+    svg+='<path d="'+area+'" fill="'+s.color+'" opacity="0.08"/>';
+    // line with draw animation
+    var d='M'+pts.join(' L');
+    svg+='<path d="'+d+'" fill="none" stroke="'+s.color+'" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" '+
+      'stroke-dasharray="2000" stroke-dashoffset="2000"><animate attributeName="stroke-dashoffset" from="2000" to="0" dur="1s" fill="freeze"/></path>';
+    // dots
+    s.points.forEach(function(p){ var i=allDays.indexOf(p.x);
+      svg+='<circle cx="'+X(i)+'" cy="'+Y(p.y)+'" r="3" fill="'+s.color+'"><title>'+p.x+': '+p.y+(opts.unit||'')+'</title></circle>';
+    });
+  });
+  svg+='</svg>';
+  // legend
+  var leg='<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px">';
+  series.forEach(function(s){ leg+='<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:3px;background:'+s.color+';border-radius:2px;display:inline-block"></span>'+s.label+'</span>'; });
+  leg+='</div>';
+  host.innerHTML=svg+leg;
+}
+function loadSenderTrend(idx, email){
+  var host=document.getElementById('htrend_'+idx);
+  if(!host) return;
+  host.innerHTML='<div class="hskel" style="height:170px"></div>';
+  apiCall('/crm/warmup/history?email='+encodeURIComponent(email)+'&days=30').then(function(r){
+    var hist=(r&&r.history)||[];
+    _lineChart(host, [
+      {label:'Health', color:'#16a34a', points:hist.map(function(p){return {x:p.day,y:p.health};})},
+      {label:'Bounce %', color:'#dc2626', points:hist.map(function(p){return {x:p.day,y:p.bounce_rate};})},
+      {label:'Reply %', color:'#2B4BF2', points:hist.map(function(p){return {x:p.day,y:p.reply_rate};})}
+    ], {max:100, unit:''});
+  }).catch(function(){ host.innerHTML='<div style="color:var(--faint);font-size:12px;padding:12px">No history yet.</div>'; });
+}
+function _drawSpark(id, s){
+  // mini bar-graph of the score breakdown (points vs max)
+  var host=document.getElementById('hspark_'+id);
+  if(!host||!s.breakdown) return;
+  var w=host.clientWidth||460, h=90, pad=24, n=s.breakdown.length, bw=Math.min(48,(w-pad*2)/n-10);
+  var svg='<svg width="100%" height="'+h+'" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">';
+  s.breakdown.forEach(function(b,i){
+    var pct=b.max>0?b.points/b.max:0, bh=Math.max(2,pct*(h-30));
+    var x=pad+i*((w-pad*2)/n)+((w-pad*2)/n-bw)/2, y=h-20-bh;
+    var col=pct>=.7?'#16a34a':pct>=.4?'#d97706':'#dc2626';
+    svg+='<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+bh+'" rx="3" fill="'+col+'" opacity="0"><animate attributeName="opacity" to="1" dur=".4s" begin="'+(i*0.06)+'s" fill="freeze"/><animate attributeName="height" from="0" to="'+bh+'" dur=".5s" begin="'+(i*0.06)+'s" fill="freeze"/><animate attributeName="y" from="'+(h-20)+'" to="'+y+'" dur=".5s" begin="'+(i*0.06)+'s" fill="freeze"/></rect>';
+    svg+='<text x="'+(x+bw/2)+'" y="'+(h-6)+'" text-anchor="middle" font-size="9" fill="var(--faint)">'+b.label.split(' ')[0]+'</text>';
+  });
+  svg+='</svg>';
+  host.innerHTML=svg;
+}
+function loadSenderHealth(){
+  var el=document.getElementById('healthPanel'), sm=document.getElementById('healthSummary');
+  if(!el) return;
+  el.innerHTML='<div class="hskel"></div><div class="hskel"></div><div class="hskel"></div>';
+  apiCall('/crm/warmup/health').then(function(r){
+    var rows=(r&&r.senders)||[];
+    if(!rows.length){ el.innerHTML='<div style="color:var(--faint);font-size:13px">'+((r&&r.note)||'No senders yet.')+'</div>'; if(sm)sm.innerHTML=''; return; }
+    if(sm && r.summary){
+      var s=r.summary;
+      function card(lbl,val,col){ return '<div style="background:var(--panel-2);border-radius:12px;padding:14px"><div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em">'+lbl+'</div><div style="font-size:26px;font-weight:800;color:'+(col||'var(--ink)')+';margin-top:2px">'+val+'</div></div>'; }
+      sm.innerHTML=card('Senders',s.count)+card('Avg health',s.avg_health,_healthColor(s.avg_health))+
+        card('Healthy',s.healthy,'#16a34a')+card('At risk',s.at_risk,s.at_risk>0?'#dc2626':'#16a34a');
+    }
+    _healthData={};
+    var html='';
+    rows.forEach(function(s,idx){
+      _healthData[idx]=s;
+      var rc=s.risk==='high'?'#dc2626':s.risk==='medium'?'#d97706':'#16a34a';
+      // COMPACT ROW (always visible) — click to expand
+      html+='<div style="border:1px solid var(--line);border-radius:12px;margin-bottom:10px;overflow:hidden;transition:box-shadow .2s" onmouseover="this.style.boxShadow=\'0 2px 12px rgba(0,0,0,.06)\'" onmouseout="this.style.boxShadow=\'none\'">';
+      html+='<div onclick="toggleHealthRow('+idx+')" style="display:flex;gap:14px;align-items:center;padding:14px;cursor:pointer;user-select:none">';
+      html+=_healthRing(s.health,44);
+      html+='<div style="flex:1;min-width:0">';
+      html+='<div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+s.email+'</div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin-top:2px">'+s.provider+' · '+s.bounce_rate+'% bounce · '+s.reply_rate+'% reply'+(s.auth_score!=null?(' · auth '+s.auth_score):'')+'</div>';
+      html+='</div>';
+      html+='<span style="font-size:10px;font-weight:700;padding:3px 9px;border-radius:6px;background:'+rc+'18;color:'+rc+';flex-shrink:0">'+s.level.toUpperCase()+'</span>';
+      html+='<svg id="hchev_'+idx+'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2.5" style="flex-shrink:0;transition:transform .25s"><path d="M9 18l6-6-6-6"/></svg>';
+      html+='</div>';
+      // EXPANDABLE DETAIL
+      html+='<div id="hd_'+idx+'" style="max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.4,0,.2,1)">';
+      html+='<div style="padding:0 14px 14px">';
+      html+='<div style="font-size:12px;color:var(--muted);background:var(--panel-2);padding:8px 12px;border-radius:8px;margin-bottom:12px">💡 '+s.recommendation+'</div>';
+      html+='<div style="font-size:11px;color:var(--faint);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Score breakdown</div>';
+      html+='<div id="hspark_'+idx+'" style="margin-bottom:10px"></div>';
+      // detail stats grid
+      html+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;font-size:12px">';
+      [['Warmup day',s.warmup_day],['Total sent',s.total_sent],['Sent today',s.warmup_sent_today],['Replies',s.replies],['Failed',s.failed],['Auth',s.auth_score!=null?s.auth_score+'/100':'—']].forEach(function(p){
+        html+='<div style="background:var(--panel-2);border-radius:8px;padding:8px"><div style="color:var(--faint);font-size:10px">'+p[0]+'</div><div style="font-weight:700;margin-top:1px">'+p[1]+'</div></div>';
+      });
+      html+='</div>';
+      if(s.risks && s.risks.length){
+        html+='<div style="margin-top:10px">';
+        s.risks.forEach(function(rk){ html+='<div style="font-size:12px;color:#b91c1c;background:#fef2f2;border-radius:8px;padding:7px 10px;margin-top:6px">⚠ '+rk+'</div>'; });
+        html+='</div>';
+      }
+      html+='</div></div>';
+      html+='</div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(e){ el.innerHTML='<div style="color:var(--red);font-size:13px">Error: '+e.message+'</div>'; });
+}
+// ===== AUTOPILOT =====
+var _apEnabled=false;
+function renderApToggle(){
+  var sw=document.getElementById('apSwitch'),kb=document.getElementById('apKnob'),lb=document.getElementById('apToggleLabel');
+  if(!sw)return;
+  sw.style.background=_apEnabled?'#16a34a':'#cbd5e1';
+  if(kb)kb.style.left=_apEnabled?'25px':'3px';
+  if(lb){lb.textContent=_apEnabled?'ON':'OFF';lb.style.color=_apEnabled?'#16a34a':'var(--faint)';}
+}
+function loadAutopilot(){
+  apiCall('/crm/autopilot/settings?mode='+dataMode()).then(function(s){
+    _apEnabled=!!s.enabled; renderApToggle();
+    document.getElementById('apDomains').value=(s.domains||[]).join('\n');
+    document.getElementById('apDaily').value=s.daily_limit||50;
+    document.getElementById('apStart').value=s.send_start_hour!=null?s.send_start_hour:9;
+    document.getElementById('apEnd').value=s.send_end_hour!=null?s.send_end_hour:18;
+    // status bar
+    var bar=document.getElementById('apStatusBar');
+    if(bar){
+      var stage=s.last_stage||'idle';
+      var col=_apEnabled?'#16a34a':'#94a3b8';
+      var icon=_apEnabled?'●':'○';
+      bar.innerHTML='<span style="color:'+col+';font-weight:700">'+icon+' Autopilot '+(_apEnabled?'ON':'OFF')+'</span> · stage: <b>'+stage+'</b>'+
+        (s.status_note?(' · '+s.status_note):'')+(s.last_run?(' · last check: '+new Date(s.last_run).toLocaleString()):'');
+    }
+    // load senders as checkboxes
+    var want=s.sender_emails||[];
+    apiCall('/senders?mode='+apiMode()).then(function(rows){
+      var host=document.getElementById('apSenders');
+      if(!rows||!rows.length){ host.innerHTML='<span style="color:var(--faint)">No senders. Add senders first.</span>'; return; }
+      var html='';
+      rows.forEach(function(sd){
+        var chk=(want.length===0||want.indexOf(sd.email)>=0)?'checked':'';
+        html+='<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer"><input type="checkbox" class="apSenderChk" value="'+sd.email+'" '+chk+'> '+sd.email+'</label>';
+      });
+      host.innerHTML=html;
+    });
+  }).catch(function(e){ var b=document.getElementById('apStatusBar'); if(b)b.textContent='Error loading: '+e.message; });
+}
+function _apCollectSettings(){
+  var domains=document.getElementById('apDomains').value.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+  var senders=Array.prototype.slice.call(document.querySelectorAll('.apSenderChk:checked')).map(function(c){return c.value;});
+  return {
+    domains:domains, sender_emails:senders,
+    daily_limit:parseInt(document.getElementById('apDaily').value)||50,
+    send_start_hour:parseInt(document.getElementById('apStart').value)||9,
+    send_end_hour:parseInt(document.getElementById('apEnd').value)||18
+  };
+}
+function saveAutopilot(){
+  var msg=document.getElementById('apSaveMsg'); if(msg)msg.textContent='Saving…';
+  apiCall('/crm/autopilot/settings?mode='+dataMode(),'POST',_apCollectSettings()).then(function(r){
+    if(msg){msg.textContent='✓ Saved (daily limit '+r.daily_limit+')';setTimeout(function(){msg.textContent='';},3000);}
+    loadAutopilot();
+  }).catch(function(e){ if(msg)msg.textContent='Error: '+e.message; });
+}
+function toggleAutopilot(){
+  var next=!_apEnabled; _apEnabled=next; renderApToggle();
+  // save current settings first, then toggle
+  apiCall('/crm/autopilot/settings?mode='+dataMode(),'POST',_apCollectSettings()).then(function(){
+    return apiCall('/crm/autopilot/toggle?mode='+dataMode()+'&enabled='+(next?'true':'false'),'POST');
+  }).then(function(){ loadAutopilot(); }).catch(function(){ _apEnabled=!next; renderApToggle(); });
+}
+function runAutopilotNow(){
+  var msg=document.getElementById('apSaveMsg'); if(msg)msg.textContent='Running one cycle…';
+  apiCall('/crm/autopilot/run-now?mode='+dataMode(),'POST').then(function(r){
+    if(msg){msg.textContent='✓ '+(r.skipped?('Skipped: '+r.skipped):(r.scrape_job?'Started scraping':r.queued?('Queued '+r.queued+' emails'):'Cycle ran'));setTimeout(function(){msg.textContent='';},4000);}
+    loadAutopilot();
+  }).catch(function(e){ if(msg)msg.textContent='Error: '+e.message; });
+}
+// ===== SEO AGENCY FINDER =====
+var _seoKeywords=[];
+function seoAddKw(kw){
+  if(_seoKeywords.indexOf(kw)<0){ _seoKeywords.push(kw); renderSeoChips(); }
+}
+function renderSeoChips(){
+  var host=document.getElementById('seoKwChips'); if(!host)return;
+  host.innerHTML=_seoKeywords.map(function(k,i){
+    return '<span style="display:inline-flex;align-items:center;gap:5px;background:var(--panel-2);border:1px solid var(--line);border-radius:16px;padding:4px 10px;font-size:12px">'+k+
+      ' <span onclick="_seoKeywords.splice('+i+',1);renderSeoChips()" style="cursor:pointer;color:var(--faint);font-weight:700">×</span></span>';
+  }).join('');
+}
+function loadSeoFinder(){
+  renderSeoChips();
+  loadSeoResults();
+}
+function startSeoSearch(){
+  var typed=document.getElementById('seoKeywords').value.trim();
+  if(typed){ typed.split(',').forEach(function(k){ if(k.trim())seoAddKw(k.trim()); }); document.getElementById('seoKeywords').value=''; }
+  if(!_seoKeywords.length){ document.getElementById('seoSearchMsg').textContent='Kam se kam ek keyword daalo.'; return; }
+  var loc=document.getElementById('seoLocation').value.trim();
+  var smode=document.getElementById('seoSearchMode').value;
+  var msg=document.getElementById('seoSearchMsg');
+  msg.textContent='Searching…'; msg.style.color='var(--muted)';
+  // run each keyword as its own search
+  var done=0, totalFound=0;
+  _seoKeywords.forEach(function(kw){
+    apiCall('/crm/seo/search?keyword='+encodeURIComponent(kw)+'&location='+encodeURIComponent(loc)+'&search_mode='+smode,'POST').then(function(r){
+      done++; totalFound+=(r.found||0);
+      msg.textContent=r.note||('Found '+r.found+' sites');
+      if(r.found>0)msg.style.color='var(--green)';
+      if(done===_seoKeywords.length){ setTimeout(loadSeoResults,2000); }
+    }).catch(function(e){ done++; msg.textContent='Error: '+e.message; msg.style.color='var(--red)'; });
+  });
+}
+function loadSeoResults(){
+  var el=document.getElementById('seoResults'), sm=document.getElementById('seoStats');
+  if(!el)return;
+  apiCall('/crm/seo/results').then(function(r){
+    var leads=(r&&r.leads)||[];
+    if(sm && r.stats){
+      var s=r.stats;
+      function card(l,v,c){ return '<div style="background:var(--panel-2);border-radius:12px;padding:14px"><div style="font-size:11px;color:var(--faint);text-transform:uppercase">'+l+'</div><div style="font-size:24px;font-weight:800;color:'+(c||'var(--ink)')+';margin-top:2px">'+v+'</div></div>'; }
+      sm.innerHTML=card('Leads',s.total)+card('With email',s.with_email,'#16a34a')+card('Domains',s.domains,'#2B4BF2');
+    }
+    if(!leads.length){ el.innerHTML='<div style="color:var(--faint);font-size:13px;padding:8px">Abhi koi lead nahi. Search chalao.</div>'; return; }
+    var html='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">';
+    html+='<tr style="text-align:left;color:var(--faint);font-size:11px;text-transform:uppercase"><th style="padding:8px">Email</th><th>Domain</th><th>Quality</th><th>Status</th></tr>';
+    leads.forEach(function(l){
+      var qc=l.quality>=85?'#16a34a':l.quality>=70?'#22c55e':l.quality>=50?'#d97706':'#dc2626';
+      html+='<tr style="border-top:1px solid var(--line)"><td style="padding:8px">'+(l.email||'<span style="color:var(--faint)">no public email</span>')+'</td>'+
+        '<td><a href="https://'+l.domain+'" target="_blank" style="color:var(--brand)">'+l.domain+'</a></td>'+
+        '<td><span title="'+(l.quality_why||'')+'" style="font-weight:700;color:'+qc+'">'+l.quality+'</span></td>'+
+        '<td><span style="font-size:11px;color:var(--faint)">'+l.status+'</span></td></tr>';
+    });
+    html+='</table></div>';
+    el.innerHTML=html;
+  }).catch(function(e){ el.innerHTML='<div style="color:var(--red);font-size:13px">Error: '+e.message+'</div>'; });
 }
 function startWarmup(){
   apiCall('/crm/warmup/start?mode='+apiMode()+'&interval_minutes=90','POST').then(r=>{

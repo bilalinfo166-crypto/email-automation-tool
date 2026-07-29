@@ -203,6 +203,10 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             # and sender1's 2nd email waits delay_seconds after sender1's 1st (not
             # after sender4's). Different senders send back-to-back with no wait.
             last_sent_at = {}
+            # EQUAL DISTRIBUTION: track how many THIS campaign has sent per sender,
+            # so we always hand the next email to whoever is furthest behind. This
+            # keeps the load even (no sender doing 100 while another does 20).
+            camp_sent = {s.email: 0 for s in senders}
 
             for i, entry in enumerate(pending):
                 # EXACT TARGET: stop the moment we've sent what was asked for.
@@ -255,22 +259,25 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                           f"earlier (no duplicate send).")
                     continue
 
-                # Pick a sender that still has daily capacity (round-robin among available)
+                # EQUAL DISTRIBUTION: pick the sender that has sent the FEWEST in
+                # this campaign so far AND still has daily capacity. Ties break by
+                # round-robin order. This spreads the emails evenly across all
+                # selected senders instead of overloading a few.
                 sender = None
-                for attempt in range(len(senders)):
-                    candidate = senders[(i + attempt) % len(senders)]
-                    sent_today = candidate.sent_today or 0
-                    cap = candidate.daily_cap or 200
-                    if sent_today < cap:
-                        sender = candidate
-                        break
+                avail = [s for s in senders
+                         if (s.sent_today or 0) < (s.daily_cap or 200)]
+                if avail:
+                    # fewest-sent first; stable so equal counts keep rotating
+                    avail.sort(key=lambda s: camp_sent.get(s.email, 0))
+                    sender = avail[0]
                 # All senders hit their daily cap — raise caps and continue instead of stopping
                 if sender is None:
                     print(f"[SendEngine] Senders hit cap — raising caps to finish campaign.")
                     for s in senders:
                         s.daily_cap = (s.sent_today or 0) + len(pending) + 10
                     db.commit()
-                    sender = senders[i % len(senders)]
+                    avail = sorted(senders, key=lambda s: camp_sent.get(s.email, 0))
+                    sender = avail[0]
 
                 # PER-SENDER gap: if THIS sender sent recently, wait out the remainder
                 # of its personal gap. Gap is RANDOM in [min_delay, max_delay] each time
@@ -393,6 +400,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                         entry.subject = rendered["subject"]
                         sender.sent_today = (sender.sent_today or 0) + 1
                         sender.total_sent = (sender.total_sent or 0) + 1
+                        camp_sent[sender.email] = camp_sent.get(sender.email, 0) + 1
                         db.add(EventLog(campaign_id=campaign_id, sender_id=sender.id,
                                        type="sent", contact_id=0))
                         db.commit()

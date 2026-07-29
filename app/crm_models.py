@@ -42,6 +42,7 @@ class Campaign(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String)
     mode: Mapped[str] = mapped_column(String, default="vendor", index=True)  # vendor / client
+    category: Mapped[str] = mapped_column(String, default="")   # for Gmail label / grouping
     # --- required for a lawful, identifiable email (CAN-SPAM style) ---
     subject: Mapped[str] = mapped_column(String, default="")
     from_name: Mapped[str] = mapped_column(String, default="")
@@ -159,6 +160,7 @@ class OutreachEntry(Base):
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     mode: Mapped[str] = mapped_column(String, default="vendor", index=True)
+    category: Mapped[str] = mapped_column(String, default="")   # for Gmail label / grouping
     email: Mapped[str] = mapped_column(String, index=True)
     domain: Mapped[str] = mapped_column(String, default="")
     email_type: Mapped[str] = mapped_column(String, default="domain_email")
@@ -268,4 +270,31 @@ class Deal(Base):
     first_reply_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     last_reply_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AppSetting(Base):
+    """Tiny key/value store for per-mode toggles that must survive restarts.
+    Used for the follow-up On/Off switch per dashboard (vendor/client/blog)."""
+    __tablename__ = "app_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String, unique=True, index=True)
+    value: Mapped[str] = mapped_column(String, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class HealthSnapshot(Base):
+    """One row per sender per day — the raw material for real trend charts.
+    Written once a day (and on demand) so we can draw health/bounce/reply/auth
+    over 7d / 30d / 90d from actual recorded history, not fabricated curves."""
+    __tablename__ = "health_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sender_email: Mapped[str] = mapped_column(String, index=True)
+    day: Mapped[str] = mapped_column(String, index=True)   # YYYY-MM-DD
+    health: Mapped[int] = mapped_column(Integer, default=0)
+    bounce_rate: Mapped[float] = mapped_column(Integer, default=0)
+    reply_rate: Mapped[float] = mapped_column(Integer, default=0)
+    auth_score: Mapped[int] = mapped_column(Integer, default=0)
+    total_sent: Mapped[int] = mapped_column(Integer, default=0)
+    warmup_sent: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

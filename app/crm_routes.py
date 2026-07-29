@@ -276,6 +276,372 @@ def warmup_run(max_sends: int = 10, db: Session = Depends(get_db)):
     return warmup.run_warmup(db, max_sends)
 
 
+@router.get("/campaign/fetch-csv")
+def campaign_fetch_csv(url: str = ""):
+    """Fetch a published Google-Sheet / CSV URL server-side (avoids browser CORS)
+    and return parsed {domain,email} rows."""
+    import csv, io
+    try:
+        import requests
+    except Exception:
+        raise HTTPException(500, "requests not available")
+    if not url:
+        raise HTTPException(400, "url required")
+    try:
+        r = requests.get(url, timeout=15,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        text = r.text
+    except Exception as e:
+        return {"rows": [], "note": f"Could not fetch: {e}"}
+    rows = []
+    try:
+        reader = csv.reader(io.StringIO(text))
+        data = list(reader)
+        if not data:
+            return {"rows": [], "note": "Sheet was empty."}
+        header = [h.strip().lower() for h in data[0]]
+        di = next((i for i, h in enumerate(header)
+                   if "domain" in h or "website" in h or "site" in h), -1)
+        ei = next((i for i, h in enumerate(header)
+                   if "email" in h or "mail" in h), -1)
+        start = 1
+        if di < 0 and ei < 0:      # no header -> col0 domain, col1 email
+            di, ei, start = 0, 1, 0
+        for row in data[start:]:
+            if not row:
+                continue
+            email = row[ei].strip() if ei >= 0 and ei < len(row) else ""
+            domain = row[di].strip() if di >= 0 and di < len(row) else ""
+            if email and "@" in email:
+                rows.append({"domain": domain or email.split("@")[1],
+                             "email": email})
+    except Exception as e:
+        return {"rows": [], "note": f"Parse error: {e}"}
+    return {"rows": rows, "count": len(rows)}
+
+
+@router.post("/outreach/add-list")
+def outreach_add_list(mode: str = "vendor", data: dict = None,
+                      db: Session = Depends(get_db)):
+    """Import a user-uploaded list (rows of {domain,email}) into this mode's
+    outreach queue as 'pending', tagged with an optional category. Skips
+    addresses already present (dedupe by mode+email)."""
+    from .crm_models import OutreachEntry
+    rows = (data or {}).get("rows", [])
+    category = (data or {}).get("category", "")
+    exclusive = (data or {}).get("exclusive", False)
+    if not rows:
+        return {"added": 0, "note": "No rows."}
+    # 'exclusive' = the user chose "my sheet only". Clear any leftover pending
+    # tool data for this mode first, so ONLY the sheet's emails get sent.
+    if exclusive:
+        from .crm_models import OutreachEntry as _OE
+        db.query(_OE).filter(_OE.mode == mode, _OE.status == "pending").delete()
+        db.commit()
+    existing = {e.email.lower() for e in db.query(OutreachEntry)
+                .filter(OutreachEntry.mode == mode).all() if e.email}
+    added = 0
+    for r in rows:
+        email = (r.get("email") or "").strip()
+        if not email or "@" not in email or email.lower() in existing:
+            continue
+        entry = OutreachEntry(mode=mode, email=email,
+                              domain=(r.get("domain") or email.split("@")[1]),
+                              status="pending")
+        # store category if the model supports it
+        if hasattr(entry, "category"):
+            entry.category = category
+        db.add(entry)
+        existing.add(email.lower())
+        added += 1
+    db.commit()
+    return {"added": added, "category": category,
+            "message": f"Imported {added} email(s)."}
+
+
+@router.post("/seo/search")
+def seo_search(keyword: str = "", location: str = "", search_mode: str = "agency",
+               db: Session = Depends(get_db)):
+    """SEO Agency Finder: find agency domains for a keyword+location, then feed
+    them to the existing scraper so their PUBLIC emails get extracted. Runs the
+    scrape as a normal background job under mode='seo'."""
+    from . import seo_finder
+    if not keyword.strip():
+        raise HTTPException(400, "keyword required")
+    res = seo_finder.search_domains(keyword, location, max_results=40)
+    domains = [d["domain"] for d in res.get("domains", [])]
+    if not domains:
+        return {"found": 0, "note": res.get("note", "No agencies found for that search."),
+                "domains": []}
+    # hand the discovered domains to the existing scraper (public email extraction)
+    job_id = None
+    try:
+        from . import scraper_jobs
+        job = scraper_jobs.create_job(
+            db, mode="seo", name=f"SEO: {keyword} {location}".strip(),
+            domains=domains, source="seo_finder")
+        job_id = getattr(job, "id", None)
+    except Exception as e:
+        return {"found": len(domains), "domains": res["domains"],
+                "scrape_error": str(e)}
+    return {"found": len(domains), "domains": res["domains"],
+            "scrape_job": job_id, "query": res.get("query"),
+            "note": f"Found {len(domains)} sites — scraping their public emails now."}
+
+
+@router.get("/seo/results")
+def seo_results(db: Session = Depends(get_db)):
+    """Leads discovered for the SEO dashboard: scraped public emails under
+    mode='seo', with a quality score each."""
+    from . import seo_finder
+    from .crm_models import OutreachEntry
+    rows = db.query(OutreachEntry).filter(OutreachEntry.mode == "seo").all()
+    leads = []
+    for r in rows:
+        lead = {"email": r.email, "domain": r.domain,
+                "status": r.status, "source": "SEO Finder"}
+        sc, why = seo_finder.quality_score({"email": r.email, "domain": r.domain,
+                                            "title": r.domain})
+        lead["quality"] = sc; lead["quality_why"] = why
+        leads.append(lead)
+    # stats roll-up
+    with_email = sum(1 for l in leads if l["email"])
+    return {"leads": leads, "stats": {
+        "total": len(leads), "with_email": with_email,
+        "domains": len({l["domain"] for l in leads})}}
+
+
+@router.get("/autopilot/settings")
+def autopilot_get(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Current Autopilot settings + status for a dashboard."""
+    from . import autopilot
+    return autopilot.get_settings(db, mode)
+
+
+@router.post("/autopilot/settings")
+def autopilot_set(mode: str = "vendor", data: dict = None,
+                  db: Session = Depends(get_db)):
+    """Update Autopilot settings (domains, senders, daily limit, hours, etc).
+    The daily limit is always clamped to a safe hard ceiling."""
+    from . import autopilot
+    return autopilot.save_settings(db, mode, data or {})
+
+
+@router.post("/autopilot/toggle")
+def autopilot_toggle(mode: str = "vendor", enabled: bool = True,
+                     db: Session = Depends(get_db)):
+    """Turn Autopilot on/off for a dashboard. Starts the background loop if
+    needed; the loop itself skips any mode that's switched off."""
+    from . import autopilot
+    autopilot.save_settings(db, mode, {"enabled": enabled})
+    if enabled:
+        autopilot.start()
+    return {"mode": mode, "enabled": enabled}
+
+
+@router.post("/autopilot/run-now")
+def autopilot_run_now(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Run one Autopilot cycle immediately (for testing / manual kick)."""
+    from . import autopilot
+    return autopilot.run_cycle(db, mode)
+
+
+@router.post("/senders/copy-to-mode")
+def copy_senders_to_mode(from_mode: str = "client", to_mode: str = "blog",
+                         db: Session = Depends(get_db)):
+    """Copy every sender from one dashboard into another (e.g. client -> blog).
+    Each copy is a fresh row with its OWN counters reset to zero, so the two
+    dashboards track their sending separately even though it's the same inbox.
+    Skips any that already exist in the target mode."""
+    from .database import Sender
+    src = db.query(Sender).filter(Sender.mode == from_mode).all()
+    if not src:
+        return {"copied": 0, "message": f"No senders in '{from_mode}'."}
+    existing = {s.email for s in db.query(Sender).filter(Sender.mode == to_mode).all()}
+    copied = 0
+    for s in src:
+        if s.email in existing:
+            continue
+        db.add(Sender(
+            email=s.email, name=s.name, mode=to_mode, method=s.method,
+            app_password=s.app_password or "",
+            oauth_token=getattr(s, "oauth_token", "") or "",
+            daily_cap=s.daily_cap, warmup=s.warmup, status=s.status,
+            health=s.health, warmup_day=s.warmup_day or 0,
+            warmup_sent_today=0, sent_today=0, total_sent=0,
+            replies=0, failed=0, opened=0,
+        ))
+        copied += 1
+    db.commit()
+    return {"copied": copied,
+            "message": f"Copied {copied} sender(s) from {from_mode} to {to_mode}."}
+
+
+@router.post("/senders/warmup-toggle")
+def sender_warmup_toggle(email: str = "", enabled: bool = True,
+                         db: Session = Depends(get_db)):
+    """Turn warmup on/off for a single sender."""
+    from .database import Sender
+    s = db.query(Sender).filter(Sender.email == email).first()
+    if not s:
+        raise HTTPException(404, "sender not found")
+    s.warmup = enabled
+    db.commit()
+    return {"email": email, "warmup": enabled}
+
+
+@router.get("/warmup/fleet-trend")
+def warmup_fleet_trend(mode: str = "", days: int = 30, db: Session = Depends(get_db)):
+    """Average health/bounce/reply across all senders in a mode, per day — the
+    data for the big chart at the top of the Warmup page. Real recorded history."""
+    from .crm_models import HealthSnapshot
+    from .database import Sender
+    from datetime import datetime, timedelta
+    q = db.query(Sender)
+    if mode:
+        q = q.filter(Sender.mode == mode)
+    emails = [s.email for s in q.all()]
+    if not emails:
+        return {"days": days, "history": []}
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = (db.query(HealthSnapshot)
+            .filter(HealthSnapshot.sender_email.in_(emails),
+                    HealthSnapshot.day >= cutoff)
+            .order_by(HealthSnapshot.day.asc()).all())
+    by_day = {}
+    for r in rows:
+        d = by_day.setdefault(r.day, {"h": [], "b": [], "rp": []})
+        d["h"].append(r.health); d["b"].append(r.bounce_rate); d["rp"].append(r.reply_rate)
+    hist = []
+    for day in sorted(by_day):
+        d = by_day[day]
+        avg = lambda xs: round(sum(xs) / len(xs), 1) if xs else 0
+        hist.append({"day": day, "health": avg(d["h"]),
+                     "bounce_rate": avg(d["b"]), "reply_rate": avg(d["rp"])})
+    return {"days": days, "history": hist}
+
+
+@router.get("/warmup/history")
+def warmup_history(email: str = "", days: int = 30, db: Session = Depends(get_db)):
+    """Recorded daily health history for one sender — real data for trend charts.
+    Empty until snapshots accumulate (one per day). We backfill nothing; the line
+    grows honestly as days pass."""
+    from . import health_engine
+    if not email:
+        raise HTTPException(400, "email required")
+    return {"email": email, "days": days,
+            "history": health_engine.get_history(db, email, days)}
+
+
+@router.get("/warmup/health")
+async def warmup_health(mode: str = "", db: Session = Depends(get_db)):
+    """Live multi-signal health score for every sender, with a breakdown and a
+    grounded recommendation. Auth score (from real DNS) feeds into each score."""
+    from . import health_engine, deliverability as deliv
+    from .database import Sender
+    import asyncio
+    q = db.query(Sender)
+    if mode:
+        q = q.filter(Sender.mode == mode)
+    senders = q.all()
+    if not senders:
+        return {"senders": [], "note": "No senders yet."}
+
+    # Check each unique domain's auth once (parallel), reuse across its senders.
+    domains = sorted({deliv.domain_of(s.email) for s in senders if s.email})
+    auth_results = await asyncio.gather(
+        *[asyncio.to_thread(deliv.check_domain, d) for d in domains])
+    auth_by_domain = {r.get("domain"): r.get("score") for r in auth_results}
+
+    rows = []
+    for s in senders:
+        dom = deliv.domain_of(s.email)
+        h = health_engine.compute_health(s, auth_score=auth_by_domain.get(dom))
+        # Per-mode sending record for THIS dashboard's mode (client/blog/vendor).
+        # Same Gmail used in two dashboards shows each dashboard's own numbers.
+        pm = health_engine.per_mode_stats(db, s.email, mode) if mode else \
+            {"sent": s.total_sent or 0, "replies": s.replies or 0,
+             "bounced": s.failed or 0}
+        rows.append({
+            "email": s.email, "domain": dom, "status": s.status,
+            "provider": "Gmail" if "gmail" in dom else dom,
+            "warmup_day": s.warmup_day or 0,
+            "total_sent": s.total_sent or 0,
+            "mode_sent": pm["sent"],
+            "mode_replies": pm["replies"],
+            "mode_bounced": pm["bounced"],
+            "warmup_sent_today": s.warmup_sent_today or 0,
+            "warmup_on": bool(s.warmup),
+            "replies": s.replies or 0, "failed": s.failed or 0,
+            "auth_score": auth_by_domain.get(dom),
+            "health": h["score"], "level": h["level"], "risk": h["risk"],
+            "bounce_rate": h["bounce_rate"], "reply_rate": h["reply_rate"],
+            "breakdown": h["breakdown"], "risks": h["risks"],
+            "recommendation": health_engine.recommend(s, h),
+        })
+        # Record today's snapshot so trend charts have real history to draw.
+        try:
+            health_engine.record_snapshot(db, s, h, auth_by_domain.get(dom))
+        except Exception:
+            pass
+    rows.sort(key=lambda r: r["health"])   # worst first, so problems surface
+    # Overview roll-up
+    n = len(rows)
+    avg = round(sum(r["health"] for r in rows) / n) if n else 0
+    healthy = sum(1 for r in rows if r["health"] >= 70)
+    at_risk = sum(1 for r in rows if r["risk"] in ("medium", "high"))
+    # Warmup engine running state + today's warmup total
+    try:
+        from . import warmup_engine
+        running = bool(getattr(warmup_engine, "_thread", None) and
+                       warmup_engine._thread.is_alive())
+    except Exception:
+        running = False
+    warm_today = sum(r["warmup_sent_today"] for r in rows)
+    return {"senders": rows, "summary": {
+        "count": n, "avg_health": avg, "healthy": healthy, "at_risk": at_risk,
+        "running": running, "warm_today": warm_today}}
+
+
+
+@router.get("/deliverability/check")
+async def deliverability_check(domain: str = ""):
+    """Real DNS-based auth report for a single domain (SPF/DKIM/DMARC/MX)."""
+    from . import deliverability as deliv
+    import asyncio
+    if not domain:
+        raise HTTPException(400, "domain required")
+    # DNS lookups block, so run them off the event loop.
+    return await asyncio.to_thread(deliv.check_domain, domain)
+
+
+@router.get("/deliverability/senders")
+async def deliverability_senders(mode: str = "", db: Session = Depends(get_db)):
+    """Auth report for every unique sender domain, so the Warmup dashboard can
+    show a deliverability panel per domain. Domains are de-duplicated (many
+    senders share one domain) and checked in parallel."""
+    from . import deliverability as deliv
+    from .database import Sender
+    import asyncio
+    q = db.query(Sender)
+    if mode:
+        q = q.filter(Sender.mode == mode)
+    domains = sorted({deliv.domain_of(s.email) for s in q.all()
+                      if s.email and "@" in s.email})
+    if not domains:
+        return {"domains": [], "note": "No senders yet."}
+    results = await asyncio.gather(
+        *[asyncio.to_thread(deliv.check_domain, d) for d in domains])
+    # Which senders sit on each domain (so the UI can list them together).
+    by_domain = {}
+    for s in q.all():
+        d = deliv.domain_of(s.email)
+        by_domain.setdefault(d, []).append(s.email)
+    for r in results:
+        r["senders"] = by_domain.get(r.get("domain"), [])
+    return {"domains": results}
+
+
 # ---------------- compliance dashboard + full stats ----------------
 
 @router.get("/dashboard")
@@ -822,6 +1188,7 @@ def create_campaign(
     total_target: int = 0,          # 0 = all pending
     scheduled_time: str = "",       # ISO datetime, empty = manual
     autopilot: bool = False,
+    category: str = "",             # e.g. "SaaS" -> Gmail label "AI SaaS Outreach"
     db: Session = Depends(get_db)
 ):
     """Create a campaign with full control: which senders, timing, autopilot."""
@@ -842,11 +1209,19 @@ def create_campaign(
         sender_emails=sender_emails, emails_per_batch=emails_per_batch,
         delay_seconds=delay_seconds, min_delay_sec=min_delay, max_delay_sec=max_delay,
         scheduled_time=scheduled_time,
-        autopilot=autopilot, total_target=target,
+        autopilot=autopilot, total_target=target, category=category,
     )
     db.add(camp); db.commit(); db.refresh(camp)
+    # Stamp this category onto the pending emails this campaign will send, so the
+    # label engine builds "AI <Category> Outreach" instead of the base label.
+    if category:
+        db.query(OutreachEntry).filter(
+            OutreachEntry.mode == mode,
+            OutreachEntry.status == "pending").update(
+            {OutreachEntry.category: category}, synchronize_session=False)
+        db.commit()
     return {"campaign_id": camp.id, "name": camp.name, "target": target,
-            "status": camp.status, "autopilot": autopilot,
+            "status": camp.status, "autopilot": autopilot, "category": category,
             "gap": f"{min_delay}-{max_delay}s random"}
 
 
@@ -1373,14 +1748,60 @@ def followups_due(mode: str = "", delay_hours: int = 24, max_followups: int = 2,
                                          max_followups=max_followups, dry_run=True)
 
 
+@router.get("/followups/toggle")
+def followups_toggle_get(mode: str = "vendor", db: Session = Depends(get_db)):
+    """Current On/Off state of follow-ups for this dashboard."""
+    from . import followup_engine
+    return {"mode": mode, "enabled": followup_engine.is_mode_enabled(db, mode)}
+
+
+@router.post("/followups/toggle")
+def followups_toggle_set(mode: str = "vendor", enabled: bool = True,
+                         db: Session = Depends(get_db)):
+    """Turn follow-ups on or off for this dashboard (vendor/client/blog).
+    Persists across restarts. Also makes sure the background engine is running
+    so that whichever modes ARE enabled keep going."""
+    from . import followup_engine
+    followup_engine.set_mode_enabled(db, mode, enabled)
+    # Keep the engine alive; it internally skips modes that are switched off.
+    if followup_engine._thread is None or not followup_engine._thread.is_alive():
+        followup_engine.start()
+    return {"mode": mode, "enabled": enabled,
+            "message": f"Follow-ups {'ON' if enabled else 'OFF'} for {mode}."}
+
+
 @router.post("/followups/run")
 def followups_run(mode: str = "", delay_hours: int = 30, max_followups: int = 2,
                   limit: int = 60, db: Session = Depends(get_db)):
-    """Send reminders now to everyone who hasn't replied."""
+    """Send reminders now to everyone who hasn't replied.
+    If no mode is given, process vendor + client + blog fairly (so vendor never
+    gets starved by older client contacts). Sundays are skipped. Modes that are
+    switched OFF are skipped."""
     from . import followup_engine
+    if followup_engine._is_sunday():
+        return {"sent": 0, "skipped_reason": "Sunday — follow-ups paused today."}
     try:
-        return followup_engine.run_followups(db, mode=mode, delay_hours=delay_hours,
-                                             max_followups=max_followups, limit=limit)
+        if mode:
+            if not followup_engine.is_mode_enabled(db, mode):
+                return {"sent": 0, "skipped_reason": f"Follow-ups are OFF for {mode}."}
+            return followup_engine.run_followups(
+                db, mode=mode, delay_hours=delay_hours,
+                max_followups=max_followups, limit=limit)
+        # No mode: run each ENABLED mode so all get a fair share (shared cap).
+        totals = {"sent": 0, "per_mode": {}}
+        for m in ("vendor", "client", "blog"):
+            if not followup_engine.is_mode_enabled(db, m):
+                totals["per_mode"][m] = "off"
+                continue
+            r = followup_engine.run_followups(
+                db, mode=m, delay_hours=delay_hours,
+                max_followups=max_followups, limit=limit)
+            totals["per_mode"][m] = r.get("sent", 0)
+            totals["sent"] += r.get("sent", 0)
+            if r.get("daily_cap_reached"):
+                totals["daily_cap_reached"] = True
+                break
+        return totals
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1786,8 +2207,20 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
                 print(f"[BlogResearch] Could not read our own domains: {oe}")
             seen_domains = set()  # global dedupe across all sites
 
+            # Overall job deadline — a hard ceiling on the WHOLE research run.
+            # Even if per-site timeouts misbehave or a background thread wedges
+            # the shared pool, the job stops here, keeps everything found so far,
+            # and marks itself done instead of appearing frozen forever.
+            import time as _t
+            _job_deadline = _t.time() + 20 * 60   # 20 minutes total, max
+
             for site in sites:
                 if _blog_stop.get(job_id, {}).get("stop"):
+                    break
+                if _t.time() > _job_deadline:
+                    print(f"[BlogResearch] Overall 20-min budget reached — "
+                          f"stopping with {seen_domains and len(seen_domains) or 0} "
+                          f"domains found. Remaining sites skipped.")
                     break
 
                 # Live callback: article opened
@@ -1825,12 +2258,31 @@ def start_blog_job(job_id: int, db: Session = Depends(get_db)):
 
                 try:
                     print(f"[BlogResearch] Researching {site}...")
-                    blog_research.research_site(
+                    # Per-site timeout: run research_site in a worker thread and
+                    # wait at most SITE_BUDGET seconds. If a single site hangs
+                    # (a slow crawl or an article that never returns), we stop
+                    # waiting and move to the next site instead of freezing the
+                    # whole job at "1/13". Links/emails found before the timeout
+                    # are already saved via the live callbacks.
+                    import concurrent.futures as _cf
+                    SITE_BUDGET = 240   # 4 min per site, then move on
+                    _site_ex = _cf.ThreadPoolExecutor(max_workers=1)
+                    _fut = _site_ex.submit(
+                        blog_research.research_site,
                         site, j.time_range, j.max_articles,
-                        workers=50, on_article=on_article, on_link=on_link,
-                        should_stop=lambda: _blog_stop.get(job_id, {}).get("stop", False),
-                        on_stats=run_stats)
-                    print(f"[BlogResearch] Done {site}")
+                        50, on_article, on_link,
+                        lambda: _blog_stop.get(job_id, {}).get("stop", False),
+                        run_stats)
+                    try:
+                        _fut.result(timeout=SITE_BUDGET)
+                        print(f"[BlogResearch] Done {site}")
+                    except _cf.TimeoutError:
+                        print(f"[BlogResearch] {site} TIMED OUT after {SITE_BUDGET}s — moving on")
+                    finally:
+                        # Don't wait on a hung worker — abandon it so the loop
+                        # can move to the next site immediately. The thread is a
+                        # daemon within the app process and will die at exit.
+                        _site_ex.shutdown(wait=False, cancel_futures=True)
                 except Exception as e:
                     import traceback
                     print(f"[BlogResearch] {site} ERROR: {e}")

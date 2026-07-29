@@ -201,6 +201,14 @@ def _startup():
     except Exception as e:
         print(f"[FollowUp] Could not start: {e}")
 
+    try:
+        from . import autopilot
+        autopilot.start()
+        print("[Autopilot] Started — checks every 15 min, sends only within "
+              "configured hours and daily limits, verified senders only.")
+    except Exception as e:
+        print(f"[Autopilot] Could not start: {e}")
+
 
 def _reset_daily(s: Sender):
     if s.last_send_date != date.today():
@@ -210,12 +218,31 @@ def _reset_daily(s: Sender):
 
 # ---------------- Senders ----------------
 
-@app.get("/senders", response_model=list[schemas.SenderOut])
+@app.get("/senders")
 def list_senders(mode: str = "", db: Session = Depends(get_db)):
+    """Senders for one dashboard. Each mode (vendor/client/blog) keeps its own
+    senders — they don't mix. total_sent is that sender's own record.
+
+    A Gmail address can be added to more than one dashboard (e.g. the same
+    inbox used for client and blog outreach). Each is a separate Sender row with
+    its own mode and its own counters, so the data stays separate per dashboard.
+    """
     q = db.query(Sender)
     if mode:
         q = q.filter(Sender.mode == mode)
-    return q.order_by(Sender.created_at.desc()).all()
+    senders = q.order_by(Sender.created_at.desc()).all()
+    out = []
+    for s in senders:
+        out.append({
+            "id": s.id, "email": s.email, "name": s.name or "",
+            "method": s.method, "daily_cap": s.daily_cap,
+            "warmup": bool(s.warmup), "status": s.status,
+            "health": s.health, "sent_today": s.sent_today or 0,
+            "total_sent": s.total_sent or 0,
+            "replies": s.replies or 0, "failed": s.failed or 0,
+            "opened": s.opened or 0, "mode": s.mode,
+        })
+    return out
 
 
 @app.get("/senders/{sender_id}", response_model=schemas.SenderOut)
@@ -254,15 +281,19 @@ def update_sender(sender_id: int, data: dict, db: Session = Depends(get_db)):
 
 @app.post("/senders/app-password", response_model=schemas.SenderOut)
 def add_app_password_sender(data: schemas.AppPasswordSenderIn, db: Session = Depends(get_db)):
-    if db.query(Sender).filter(Sender.email == data.email).first():
-        raise HTTPException(400, "That email is already connected.")
+    _mode = getattr(data, 'mode', 'vendor') or 'vendor'
+    # Same email may exist in a DIFFERENT dashboard (mode); only block a true
+    # duplicate within the same mode.
+    if db.query(Sender).filter(Sender.email == data.email,
+                               Sender.mode == _mode).first():
+        raise HTTPException(400, "That email is already connected in this dashboard.")
 
     # Save INSTANTLY — no blocking SMTP check. Verification happens in the
     # background so the Add button responds immediately.
     s = Sender(
         email=data.email,
         name=data.name or data.email.split("@")[0].title(),
-        mode=getattr(data, 'mode', 'vendor') or 'vendor',
+        mode=_mode,
         method="app_password",
         app_password=security.encrypt(data.app_password),
         daily_cap=20 if data.warmup else data.daily_cap,

@@ -36,16 +36,22 @@ WARMUP_SUBJECTS = [
 ]
 
 WARMUP_BODIES = [
+    # short (10-25 words)
     "Hi,\n\nJust following up on what we discussed. Everything looks good — let me know if you need anything else.\n\nBest",
     "Hey,\n\nThanks for sending that over. I've reviewed it and it all makes sense. Talk soon.\n\nCheers",
     "Hello,\n\nQuick update — things are moving nicely. I'll share more later this week.\n\nRegards",
     "Hi,\n\nAppreciate the quick turnaround. Let's touch base tomorrow to finalize.\n\nThanks",
     "Hey,\n\nGood progress today. I've noted the changes and will update accordingly.\n\nBest",
-    "Hi,\n\nJust confirming I received everything. All clear on my side. Have a great day.\n\nCheers",
-    "Hello,\n\nThanks for the reminder. I'll get that sorted by end of day.\n\nRegards",
-    "Hi,\n\nLooks great to me. No changes needed. Ready to move forward whenever.\n\nBest",
-    "Hey,\n\nHope you're doing well. Wanted to check in and see how things are going.\n\nCheers",
-    "Hi,\n\nThanks for your patience. I've wrapped up my part — over to you now.\n\nBest",
+    # medium (30-55 words)
+    "Hi there,\n\nHope your week is going well. I wanted to circle back on the notes you shared earlier — they were really helpful and gave me a clearer picture of where things stand. I'll put together a short summary and send it your way before the weekend.\n\nBest regards",
+    "Hello,\n\nThanks again for the call yesterday. I've had some time to think it over and I agree with the direction we settled on. A couple of small details still need ironing out, but nothing major. Let's keep the momentum going and check in again mid-week.\n\nCheers",
+    "Hey,\n\nJust a quick note to say the materials arrived and everything looks complete. I went through each section carefully and didn't spot any issues. I'll start on my part first thing tomorrow and keep you posted as things progress.\n\nTalk soon",
+    "Hi,\n\nAppreciate you being flexible with the timing this week. Things have been a little hectic on my end, but I'm caught up now and ready to move forward. I'll have the next piece ready shortly and will flag anything that needs your input.\n\nThanks so much",
+    # longer (65-100 words)
+    "Hi,\n\nI hope this finds you well. I wanted to take a moment to properly thank you for all the effort you've put in recently — it hasn't gone unnoticed. The way everything came together was genuinely impressive, and it made the whole process far smoother than I expected. I've gone back through the details a second time and I'm happy to say I don't have any concerns at all. Whenever you're ready, I think we're in a great position to take the next step. Looking forward to it.\n\nWarm regards",
+    "Hello,\n\nThanks for your patience while I worked through everything on my side. It took a little longer than planned, but I wanted to make sure I gave it the attention it deserved rather than rushing. Having now reviewed all the pieces together, I'm confident we're on the right track. There are one or two minor things I'd like to run past you, but they're small and shouldn't hold anything up. Let me know a good time to chat this week and we'll wrap up the remaining points.\n\nAll the best",
+    "Hey,\n\nJust wanted to send a proper update rather than another quick line. Overall things are progressing really well and I'm pleased with how it's shaping up. I spent a good part of today going through the finer details and everything is holding together nicely. A few areas could still be polished slightly, but the core is solid and I don't foresee any problems. I'll keep chipping away at the smaller items and should have a more complete version to share with you by the end of the week.\n\nCheers for now",
+    "Hi,\n\nHope you're keeping well. I realised it had been a little while since my last proper note, so I wanted to check in and let you know where things stand. The good news is that everything is moving along steadily and there haven't been any surprises. I've made a point of double-checking the important parts, and they all look sound. If anything comes up that needs your attention I'll reach out straight away, but for now you can consider things well in hand.\n\nSpeak soon",
 ]
 
 WARMUP_REPLIES = [
@@ -108,16 +114,33 @@ def _rescue_and_reply(email_addr, app_password):
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(email_addr, app_password)
 
-        # SPAM → INBOX
+        # SPAM → INBOX ("mark not spam"). This is the key reputation move: an
+        # email that lands in spam but gets pulled back to the inbox teaches Gmail
+        # the sender is wanted. We rescue up to 30 per cycle and log how many.
         try:
-            mail.select('"[Gmail]/Spam"')
-            _, data = mail.search(None, 'SUBJECT "WU"')
-            for num in data[0].split()[:10]:
-                mail.store(num, '+X-GM-LABELS', '\\Inbox')
-                mail.store(num, '-X-GM-LABELS', '\\Spam')
-                rescued += 1
-        except Exception:
-            pass
+            # Gmail's spam folder; the quoted name is the reliable selector.
+            spam_ok = False
+            for folder in ('"[Gmail]/Spam"', "[Gmail]/Spam", "Spam"):
+                try:
+                    typ, _ = mail.select(folder)
+                    if typ == "OK":
+                        spam_ok = True
+                        break
+                except Exception:
+                    continue
+            if spam_ok:
+                _, data = mail.search(None, 'SUBJECT "WU"')
+                ids = data[0].split()
+                for num in ids[:30]:
+                    mail.store(num, '+X-GM-LABELS', '\\Inbox')
+                    mail.store(num, '-X-GM-LABELS', '\\Spam')
+                    mail.store(num, '+FLAGS', '\\Seen')
+                    rescued += 1
+                if rescued:
+                    print(f"[Warmup] {email_addr}: rescued {rescued} email(s) "
+                          f"from spam → inbox (marked not-spam).")
+        except Exception as e:
+            print(f"[Warmup] {email_addr}: spam rescue error: {e}")
 
         # INBOX: read + important + reply
         try:
