@@ -158,6 +158,34 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                     print(f"[SendEngine] These chosen senders can't be used "
                           f"(not found / auth failed): {', '.join(missing)}")
                 senders = usable
+            # Drop senders that have NO usable credential — an app-password sender
+            # with no password, or an OAuth sender with no token. Otherwise every
+            # email handed to them fails and the campaign stalls early.
+            ready = []
+            dropped = []
+            for s in senders:
+                ok = False
+                if s.method == "app_password":
+                    ok = bool(s.app_password)
+                elif s.method == "oauth":
+                    ok = bool(s.oauth_token)
+                if ok:
+                    ready.append(s)
+                else:
+                    dropped.append(s.email)
+            if dropped:
+                print(f"[SendEngine] Skipping {len(dropped)} sender(s) with no "
+                      f"credential: {', '.join(dropped)}")
+            senders = ready
+            # Roll over each sender's daily counter if we're on a new day, so
+            # yesterday's count doesn't make a fresh sender look "full" today.
+            from datetime import date as _date
+            _today = _date.today()
+            for s in senders:
+                if getattr(s, "last_send_date", None) != _today:
+                    s.sent_today = 0
+                    s.last_send_date = _today
+            db.commit()
             if not senders:
                 campaign.status = "error: no senders"
                 db.commit()
@@ -203,6 +231,7 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
             # and sender1's 2nd email waits delay_seconds after sender1's 1st (not
             # after sender4's). Different senders send back-to-back with no wait.
             last_sent_at = {}
+            capped_senders = set()   # senders that hit Gmail's daily limit this run
             # EQUAL DISTRIBUTION: track how many THIS campaign has sent per sender,
             # so we always hand the next email to whoever is furthest behind. This
             # keeps the load even (no sender doing 100 while another does 20).
@@ -267,9 +296,18 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 avail = [s for s in senders
                          if (s.sent_today or 0) < (s.daily_cap or 200)]
                 if avail:
-                    # fewest-sent first; stable so equal counts keep rotating
-                    avail.sort(key=lambda s: camp_sent.get(s.email, 0))
-                    sender = avail[0]
+                    now = time.time()
+                    # Prefer senders that are READY right now (their personal gap
+                    # has already elapsed) so we never block the whole campaign
+                    # waiting on one sender while others sit idle. Among ready
+                    # senders, pick the one that has sent the fewest this campaign.
+                    def _ready(s):
+                        prev = last_sent_at.get(s.email)
+                        return prev is None or (now - prev) >= min_delay
+                    ready_now = [s for s in avail if _ready(s)]
+                    pool = ready_now if ready_now else avail
+                    pool.sort(key=lambda s: camp_sent.get(s.email, 0))
+                    sender = pool[0]
                 # All senders hit their daily cap — raise caps and continue instead of stopping
                 if sender is None:
                     print(f"[SendEngine] Senders hit cap — raising caps to finish campaign.")
@@ -286,6 +324,12 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                 prev = last_sent_at.get(sender.email)
                 if prev is not None:
                     this_gap = random.randint(min_delay, max_delay)
+                    # Safety for NEW inboxes: a sender still early in warmup gets a
+                    # bigger gap even in fast mode, so a fresh account isn't pushed
+                    # hard enough to get flagged/banned.
+                    wday = getattr(sender, "warmup_day", 0) or 0
+                    if getattr(sender, "warmup", False) and wday < 7:
+                        this_gap = max(this_gap, 25)
                     elapsed = time.time() - prev
                     remaining = this_gap - elapsed
                     if remaining > 0:
@@ -418,11 +462,54 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                         print(f"[SendEngine] FAILED (no valid creds): {entry.email} via {sender.email}")
 
                 except Exception as e:
+                    emsg = str(e).lower()
+                    # Gmail "5.4.5 Daily user sending limit exceeded" — the email
+                    # is fine, the SENDER is just out of quota for today. Don't
+                    # burn the email as bounced: put it back to pending and drop
+                    # this sender for the rest of the run.
+                    if "5.4.5" in emsg or "daily user sending limit" in emsg \
+                            or "sending limit exceeded" in emsg:
+                        entry.status = "pending"
+                        entry.sender_email = ""
+                        db.commit()
+                        capped_senders.add(sender.email)
+                        senders = [s for s in senders if s.email not in capped_senders]
+                        print(f"[SendEngine] {sender.email} hit Gmail's daily limit "
+                              f"— skipping it for today ({len(senders)} sender(s) left).")
+                        if not senders:
+                            campaign.status = "paused: daily limit"
+                            db.commit()
+                            print("[SendEngine] All senders hit their daily Gmail "
+                                  "limit. Campaign paused — resume tomorrow when "
+                                  "the limits reset.")
+                            break
+                        continue
+                    # Bad app-password: this SENDER can't log in. Don't burn the
+                    # email — requeue it and drop the sender for this run, and say
+                    # clearly WHICH sender needs its app-password fixed.
+                    if "5.7.8" in emsg or "badcredentials" in emsg \
+                            or "username and password not accepted" in emsg:
+                        entry.status = "pending"
+                        entry.sender_email = ""
+                        db.commit()
+                        capped_senders.add(sender.email)
+                        senders = [s for s in senders if s.email not in capped_senders]
+                        print(f"[SendEngine] ⚠ BAD APP-PASSWORD: {sender.email} "
+                              f"— Gmail rejected its login. Fix this sender's "
+                              f"app-password. Skipping it ({len(senders)} left).")
+                        if not senders:
+                            campaign.status = "error: bad credentials"
+                            db.commit()
+                            print("[SendEngine] All chosen senders have bad "
+                                  "app-passwords. Campaign stopped — fix them "
+                                  "in the Senders tab.")
+                            break
+                        continue
                     entry.status = "bounced"
                     db.add(EventLog(campaign_id=campaign_id, sender_id=sender.id,
                                    type="failed", contact_id=0))
                     db.commit()
-                    print(f"[SendEngine] Failed: {entry.email} — {e}")
+                    print(f"[SendEngine] Failed: {entry.email} via {sender.email} — {e}")
 
                 # (Gap is handled per-sender at the top of the loop — no global wait here,
                 # so different senders send back-to-back while each sender paces itself.)

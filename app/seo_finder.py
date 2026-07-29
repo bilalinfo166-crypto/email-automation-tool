@@ -40,7 +40,14 @@ def _root(url: str) -> str:
 
 
 def _skip(host: str) -> bool:
-    return any(host == s or host.endswith("." + s) for s in _SKIP_HOSTS)
+    if any(host == s or host.endswith("." + s) for s in _SKIP_HOSTS):
+        return True
+    # Also reject free/hosted-subdomain providers (blogspot, wordpress.com, wix…)
+    try:
+        from .scraper_jobs import is_free_host
+        return is_free_host(host)
+    except Exception:
+        return False
 
 
 def search_domains(keyword: str, location: str = "", max_results: int = 30):

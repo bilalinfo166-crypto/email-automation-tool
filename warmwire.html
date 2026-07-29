@@ -2163,6 +2163,11 @@ var campSelectedSenders=[];
 function renderCampaigns(){
   try{ if(typeof _campSource!=='undefined') setCampSource(_campSource||'tool'); }catch(e){}
   apiCall('/senders?mode='+apiMode()).then(rows=>{
+    // Drop any previously-selected senders that don't belong to THIS dashboard
+    // (switching vendor -> client left the old vendor senders selected, so they
+    // leaked into the client campaign). Keep only ones valid for this mode.
+    var validEmails=rows.map(function(s){return s.email;});
+    campSelectedSenders=campSelectedSenders.filter(function(e){return validEmails.indexOf(e)>=0;});
     var picker=document.getElementById('campSenderPicker');
     if(picker){
       if(!rows.length){picker.innerHTML='<span class="cc-sender-empty">No senders yet. Add senders in the Senders tab first.</span>';}
@@ -3360,6 +3365,9 @@ window.addEventListener('beforeunload', function(){
 // Deferred to the next tick so every variable is initialised, and each call is
 // guarded so one failure can never blank the rest of the dashboard.
 function reloadForMode(){
+  // Switching dashboards must not carry over the previous mode's selected
+  // campaign senders (that's how vendor senders leaked into a client campaign).
+  try{ campSelectedSenders=[]; }catch(e){}
   setTimeout(function(){
     // Scraper jobs belong to one mode only — reset its live tracking.
     // (Rows themselves come from the snapshot, so they aren't wiped here.)

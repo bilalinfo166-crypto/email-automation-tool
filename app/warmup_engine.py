@@ -98,7 +98,7 @@ def _send_warmup(from_email, from_pw, from_name, to_email):
     msg["X-Warmup"] = "true"
     msg.attach(MIMEText(body, "plain"))
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.ehlo(); s.starttls(); s.login(from_email, from_pw)
             s.send_message(msg)
         return subject
@@ -111,7 +111,7 @@ def _rescue_and_reply(email_addr, app_password):
     """Rescue WU emails from spam, mark important, read, reply."""
     rescued = 0; replied = 0
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         mail.login(email_addr, app_password)
 
         # SPAM → INBOX ("mark not spam"). This is the key reputation move: an
@@ -159,7 +159,7 @@ def _rescue_and_reply(email_addr, app_password):
                     r["From"] = email_addr; r["To"] = reply_to
                     r["Subject"] = "Re: " + orig; r["X-Warmup"] = "true"
                     try:
-                        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+                        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
                             s.ehlo(); s.starttls(); s.login(email_addr, app_password)
                             s.send_message(r)
                         replied += 1

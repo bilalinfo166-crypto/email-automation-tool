@@ -77,7 +77,7 @@ def send_via_smtp(sender_email: str, sender_name: str, app_password: str,
     message_id = message_id or new_message_id(sender_email)
     msg = _build_message(sender_email, sender_name, to, subject, body_html,
                          message_id, in_reply_to, references)
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
         server.ehlo()
         server.starttls()
         server.login(sender_email, app_password)

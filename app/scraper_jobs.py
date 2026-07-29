@@ -73,6 +73,35 @@ EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 JUNK_ENDINGS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
 
+# Free / hosted-subdomain providers. A site on one of these (e.g.
+# myblog.blogspot.com) is a free page, not a real business — reject the whole
+# domain everywhere so no time is wasted scraping it.
+FREE_HOST_SUFFIXES = (
+    "blogspot.com", "wordpress.com", "wixsite.com", "wix.com", "weebly.com",
+    "squarespace.com", "webflow.io", "wordpress.org", "blogger.com",
+    "tumblr.com", "medium.com", "substack.com", "ghost.io", "over-blog.com",
+    "livejournal.com", "typepad.com", "jimdo.com", "jimdofree.com",
+    "godaddysites.com", "site123.me", "yolasite.com", "webnode.com",
+    "webs.com", "strikingly.com", "carrd.co", "notion.site", "framer.website",
+    "framer.app", "netlify.app", "netlify.com", "vercel.app", "herokuapp.com",
+    "github.io", "gitlab.io", "pages.dev", "web.app", "firebaseapp.com",
+    "myshopify.com", "bigcartel.com", "storenvy.com", "ecwid.com",
+    "wixstudio.com", "mystrikingly.com", "glitch.me", "repl.co",
+    "surge.sh", "000webhostapp.com", "wpcomstaging.com", "hashnode.dev",
+    "gumroad.com", "carbonmade.com", "journoportfolio.com", "contently.com",
+    "wordpress.blog", "home.blog", "blog.com", "weebly.site",
+)
+
+
+def is_free_host(domain: str) -> bool:
+    """True if the domain is on a free/hosted-subdomain provider (blogspot,
+    wordpress.com, wix, etc). These are rejected by every scraper."""
+    d = (domain or "").strip().lower().replace("www.", "")
+    if not d:
+        return True
+    return any(d == suf or d.endswith("." + suf) for suf in FREE_HOST_SUFFIXES)
+
+
 def normalize_domain(raw: str) -> str:
     d = raw.strip().lower()
     if not d:
@@ -80,7 +109,11 @@ def normalize_domain(raw: str) -> str:
     if "//" not in d:
         d = "https://" + d
     host = urlparse(d).netloc or urlparse(d).path
-    return host.replace("www.", "").split("/")[0].strip()
+    host = host.replace("www.", "").split("/")[0].strip()
+    # Reject free-host domains outright — they never make good business leads.
+    if is_free_host(host):
+        return ""
+    return host
 
 
 def clean_email(e: str) -> str:
