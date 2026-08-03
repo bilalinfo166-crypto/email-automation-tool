@@ -384,7 +384,10 @@ def start_campaign_send(campaign_id: int, mode: str, emails_per_batch: int = 10,
                     from .email_verify import quick_verify
                     is_valid, reason = quick_verify(entry.email)
                     if not is_valid and reason in ("invalid_syntax", "no_mx_record"):
-                        entry.status = "bounced"
+                        # Not a real bounce — we never sent it. Mark 'invalid' so
+                        # it leaves the queue without inflating the bounce rate
+                        # (which would hurt the sender's apparent reputation).
+                        entry.status = "invalid"
                         db.commit()
                         print(f"[SendEngine] Skipped invalid: {entry.email} ({reason})")
                         continue

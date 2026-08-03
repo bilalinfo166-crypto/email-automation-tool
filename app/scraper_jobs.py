@@ -29,6 +29,57 @@ _threads: dict[int, threading.Thread] = {}
 # In-memory stop flags — checked on EVERY domain so Stop is instant, not batched.
 _stop_flags: dict[int, bool] = {}
 
+# Watchdog: remembers each running job's last-seen progress so we can tell if a
+# job has silently stalled (thread died / wedged) and revive it automatically.
+_last_progress: dict[int, tuple] = {}   # job_id -> (done_count, timestamp)
+_watchdog_started = False
+
+
+def start_watchdog(interval_seconds: int = 120, stall_seconds: int = 240):
+    """Every couple of minutes, check running scraper jobs. If a job's 'done'
+    count hasn't moved for a few minutes AND its worker thread is gone or wedged,
+    resume it — so a stuck job recovers itself instead of sitting frozen."""
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+    import time as _t
+
+    def _loop():
+        while True:
+            _t.sleep(interval_seconds)
+            try:
+                db = SessionLocal()
+                try:
+                    running = db.query(ScraperJob).filter(
+                        ScraperJob.status == "running").all()
+                    now = _t.time()
+                    for job in running:
+                        done = job.done or 0
+                        prev = _last_progress.get(job.id)
+                        thread = _threads.get(job.id)
+                        alive = thread is not None and thread.is_alive()
+                        if prev and prev[0] == done and (now - prev[1]) >= stall_seconds:
+                            # No progress for a while. If the thread is dead, or
+                            # wedged, revive the job.
+                            if not alive:
+                                print(f"[Watchdog] Job #{job.id} stalled at "
+                                      f"{done} domains — auto-resuming.")
+                                try:
+                                    resume(db, job.id)
+                                except Exception as e:
+                                    print(f"[Watchdog] resume failed: {e}")
+                                _last_progress[job.id] = (done, now)
+                        else:
+                            _last_progress[job.id] = (done, now)
+                finally:
+                    db.close()
+            except Exception as e:
+                print(f"[Watchdog] error: {e}")
+
+    threading.Thread(target=_loop, daemon=True).start()
+    print("[Watchdog] Scraper watchdog started — stuck jobs auto-recover.")
+
 
 # Total worker budget shared across ALL running jobs. Kept modest on purpose:
 # the same machine also serves the web UI, and saturating the CPU/network makes
@@ -385,8 +436,15 @@ def _run(job_id: int):
         # Total domains in this job (for worker sizing + retry policy)
         total_domains = db.query(ScraperJobDomain).filter(
             ScraperJobDomain.job_id == job_id).count()
-        # Retry ROUNDS that run AFTER the main pass finishes (big jobs get fewer)
-        max_retry_rounds = 1 if total_domains > 1000 else 2
+        # Retry ROUNDS that run AFTER the main pass. Big batches (10k–20k) hit
+        # transient network/DNS rate-limits, so they get MORE retry rounds — the
+        # domains that failed on a busy pass usually succeed on a calmer retry.
+        if total_domains > 10000:
+            max_retry_rounds = 3
+        elif total_domains > 1000:
+            max_retry_rounds = 2
+        else:
+            max_retry_rounds = 2
 
         workers = _effective_workers(total_domains)
         print(f"[WarmWire] Job #{job_id}: {total_domains} domains → {workers} workers")

@@ -190,11 +190,18 @@ def _get2(url, to=None):
         return (None, "ssl")
     except requests.exceptions.ConnectionError as e:
         msg=str(e).lower()
-        if "name or service" in msg or "nodename" in msg or "getaddrinfo" in msg or "name resolution" in msg:
+        # Only a REAL name-resolution failure means the domain is dead. Under a
+        # big batch the DNS server can rate-limit us and throw generic connection
+        # errors for domains that are actually fine — those must be retryable,
+        # not marked "does not resolve".
+        if ("name or service not known" in msg or "nodename nor servname" in msg
+                or "getaddrinfo failed" in msg or "name resolution" in msg
+                or "no address associated" in msg):
             return (None, "dns")
         if "refused" in msg:
             return (None, "refused")
-        return (None, "refused")
+        # timeouts, reset, temporary failures — retryable, not dead
+        return (None, "timeout")
     except requests.exceptions.Timeout:
         return (None, "timeout")
     except Exception:
@@ -258,6 +265,11 @@ def _extract(html_text):
                           "firstname","lastname","dummy","placeholder","undefined",
                           "email","e-mail","address","user","username"}
     clean=set()
+    # A "domain" that ends in a file/image extension isn't a real domain — these
+    # come from filenames like 08.28.53@2x.jpeg being mistaken for an address.
+    FILE_EXT_TLDS = {"jpeg","jpg","png","gif","webp","svg","bmp","ico","pdf",
+                     "doc","docx","zip","mp4","mp3","css","js","json","xml",
+                     "woff","woff2","ttf","eot","webm","mov","avi"}
     for e in found:
         e=e.lower().strip(".")
         if len(e)>60 or len(e)<5: continue
@@ -267,6 +279,11 @@ def _extract(html_text):
         if len(local)>40 or len(dom)>40: continue
         tld=dom.rsplit(".",1)[-1]
         if len(tld)>10 or len(tld)<2: continue  # generous TLD length
+        if tld in FILE_EXT_TLDS: continue  # reject image/file "emails"
+        # Reject local parts that look like a timestamp / filename fragment, e.g.
+        # "08.28.53" from screenshot names, not a real inbox.
+        if re.match(r'^\d{1,2}[.\-]\d{1,2}[.\-]\d{1,2}', local): continue
+        if re.match(r'^\d+x\d*$', local): continue   # "2x", "1024x768"
         if not re.match(r'^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,10}$',dom): continue
         # REAL TLD CHECK — reject fake TLDs like .davis .can .inte .con
         if not _valid_tld(dom): continue

@@ -112,8 +112,17 @@ def _startup():
             except Exception as se:
                 print(f"[AutoResume] Could not start queued job: {se}")
         else:
-            print("[AutoResume] Queued job(s) are waiting — press Resume in the "
-                  "Email Scraper panel to continue them.")
+            # Interrupted scraper jobs are auto-resumed so a restart never leaves
+            # a job "running" with a dead thread (the stuck-forever zombie). Each
+            # is resumed on its own background thread; only one scrapes at a time.
+            for job in interrupted:
+                try:
+                    db.refresh(job)
+                    if job.status == "queued":
+                        scraper_jobs.resume(db, job.id)
+                        print(f"[AutoResume] Auto-resumed scraper job #{job.id}.")
+                except Exception as se:
+                    print(f"[AutoResume] Could not auto-resume job #{job.id}: {se}")
 
         # 2) Campaigns that were "sending" when the server stopped
         try:
@@ -208,6 +217,12 @@ def _startup():
               "configured hours and daily limits, verified senders only.")
     except Exception as e:
         print(f"[Autopilot] Could not start: {e}")
+
+    try:
+        from . import scraper_jobs as _sj
+        _sj.start_watchdog()
+    except Exception as e:
+        print(f"[Watchdog] Could not start: {e}")
 
 
 def _reset_daily(s: Sender):
